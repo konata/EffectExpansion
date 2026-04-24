@@ -1,31 +1,46 @@
 package side.effect.free
 
-import Predef.{debug, error, raise}
-import Wrappers.{RichBody, SAssignStmt, SLocal}
-
-import soot.jimple._
-import soot.{Local, SootMethod, Value, Unit => SootUnit}
-
+import scala.language.implicitConversions
 import scala.collection.mutable
 import scala.util.control.Exception.catching
+
+import Predef.{debug, raise}
+import Wrappers.{SAssignStmt, SLocal}
+
+import soot.jimple.*
+import soot.{Local, SootMethod, Value, Unit as SootUnit}
+
+// ── Value Domain ──────────────────────────────────────────────────────────────
+
+sealed trait Primitive
+sealed trait Reference
+
+enum Types:
+  case Ints(value: Int)         extends Types with Primitive
+  case Doubles(value: Double)   extends Types with Primitive
+  case Floats(value: Float)     extends Types with Primitive
+  case Longs(value: Long)       extends Types with Primitive
+  case Shorts(value: Short)     extends Types with Primitive
+  case Bytes(value: Byte)       extends Types with Primitive
+  case Booleans(value: Boolean) extends Types with Primitive
+  case Chars(value: Char)       extends Types with Primitive
+  case Arrays(value: mutable.Seq[Types]) extends Types with Reference
+  case Strings(value: String)            extends Types with Reference
+  case Objects(value: AnyRef)            extends Types with Reference
+  case Undefined                         extends Types with Reference
+
+// ── Execution State ───────────────────────────────────────────────────────────
 
 case class Needle(procedure: SootMethod) {
   val instructions           = procedure.retrieveActiveBody().units
   var next: Option[SootUnit] = Option(instructions.getFirst)
-  def jmp(to: SootUnit)      = next = Some(to)
+  def jmp(to: SootUnit): Unit = next = Some(to)
 
-  /** advance the needle,
-    * [[next]] was always non-empty, cause each call to advance will check its presents
-    *  [[next]] may be None after [[advance]] was executed
-    *
-    * @return the needle should be interpreted, never None
-    */
   def advance: SootUnit = {
     val following = for {
-      next <- next // always success
-      to   <- Some(instructions.getSuccOf(next)) // maybe fail
-    } yield to
-
+      current <- next
+      after   <- Option(instructions.getSuccOf(current))
+    } yield after
     val instr = next.get
     next = following
     instr
@@ -43,84 +58,83 @@ case class Scope(
 }
 
 object Scope {
-  implicit object StaticScope {
-    val global: mutable.Map[String, Types] = mutable.Map()
-  }
+  given global: mutable.Map[String, Types] = mutable.Map()
 }
 
-sealed trait Types {}
-sealed class Primitive extends Types
-sealed class Reference extends Types
+// ── Syntax ────────────────────────────────────────────────────────────────────
 
-// TODO: employ AnyVal
-case class Ints(value: Int)         extends Primitive
-case class Doubles(value: Double)   extends Primitive
-case class Floats(value: Float)     extends Primitive
-case class Longs(value: Long)       extends Primitive
-case class Shorts(value: Short)     extends Primitive
-case class Bytes(value: Byte)       extends Primitive
-case class Booleans(value: Boolean) extends Primitive
-case class Chars(value: Char)       extends Primitive
+trait Syntax
 
-case class Arrays(value: mutable.Seq[Types]) extends Reference
-case class Strings(value: String)            extends Reference
-case class Objects(value: AnyRef)            extends Reference
-case object Undefined                        extends Reference
-
-trait Syntax {}
-
-sealed trait StatementSyntax extends Syntax {
+sealed trait StatementSyntax extends Syntax:
   def eval(scope: Scope): Scope = ???
-}
-sealed trait ValueSyntax extends Syntax {
+
+sealed trait ValueSyntax extends Syntax:
   def eval(scope: Scope): (Option[Types], Scope) = ???
-}
 
 sealed trait ScalarSyntaxes  extends ValueSyntax
 sealed trait MiscSyntax      extends ValueSyntax
 sealed trait ConstantsSyntax extends ValueSyntax
 sealed trait InvokeSyntax    extends ValueSyntax
 
+// ── Statement Syntax ──────────────────────────────────────────────────────────
+
 object StatementSyntax {
-  class BreakPoint(expr: BreakpointStmt) extends StatementSyntax
-  class Invoke(expr: InvokeExpr)         extends StatementSyntax
-  class Assign(expr: AssignStmt) extends StatementSyntax {
+
+  class BreakPoint(val expr: BreakpointStmt)     extends StatementSyntax
+  class Invoke(val expr: InvokeExpr)             extends StatementSyntax
+  class Identity(val expr: IdentityStmt)         extends StatementSyntax
+  class EnterMonitor(val expr: EnterMonitorStmt) extends StatementSyntax
+  class ExitMonitor(val expr: ExitMonitorStmt)   extends StatementSyntax
+  class Goto(val expr: GotoStmt)                 extends StatementSyntax
+  class If(val expr: IfStmt)                     extends StatementSyntax
+  class LookUpSwitch(val expr: LookupSwitchStmt) extends StatementSyntax
+  class TableSwitch(val expr: TableSwitchStmt)   extends StatementSyntax
+  class Nop(val expr: NopStmt)                   extends StatementSyntax
+  class Return(val expr: ReturnStmt)             extends StatementSyntax
+  class ReturnVoid(val expr: ReturnVoidStmt)     extends StatementSyntax
+  class Throw(val expr: ThrowStmt)               extends StatementSyntax
+
+  class Assign(val expr: AssignStmt) extends StatementSyntax {
     override def eval(scope: Scope) = {
-      val SAssignStmt(left @ SLocal(name, _), right) = expr
+      val SAssignStmt(left @ SLocal(_, _), right) = expr: @unchecked
       val (resolved, _) = right match {
         case value: ValueSyntax => value.eval(scope)
-        case _                  => raise("Assign.eval", s"invalid value type:$right")
+        case _                  => raise("Assign.eval", s"invalid value type: $right")
       }
       resolved.foreach(scope.local(left) = _)
       scope
     }
   }
-  class Identity(expr: IdentityStmt)         extends StatementSyntax
-  class EnterMonitor(expr: EnterMonitorStmt) extends StatementSyntax
-  class ExitMonitor(expr: ExitMonitorStmt)   extends StatementSyntax
-  class Goto(expr: GotoStmt)                 extends StatementSyntax
-  class If(expr: IfStmt)                     extends StatementSyntax
-  class LookUpSwitch(expr: LookupSwitchStmt) extends StatementSyntax
-  class TableSwitch(expr: TableSwitchStmt)   extends StatementSyntax
-  class Nop(expr: NopStmt)                   extends StatementSyntax
-  class Return(expr: ReturnStmt)             extends StatementSyntax
-  class ReturnVoid(expr: ReturnVoidStmt)     extends StatementSyntax
-  class Throw(expr: ThrowStmt)               extends StatementSyntax
+
+  given Conversion[BreakpointStmt, BreakPoint]       = BreakPoint(_)
+  given Conversion[InvokeExpr, Invoke]               = Invoke(_)
+  given Conversion[AssignStmt, Assign]               = Assign(_)
+  given Conversion[IdentityStmt, Identity]           = Identity(_)
+  given Conversion[EnterMonitorStmt, EnterMonitor]   = EnterMonitor(_)
+  given Conversion[ExitMonitorStmt, ExitMonitor]     = ExitMonitor(_)
+  given Conversion[GotoStmt, Goto]                   = Goto(_)
+  given Conversion[IfStmt, If]                       = If(_)
+  given Conversion[LookupSwitchStmt, LookUpSwitch]   = LookUpSwitch(_)
+  given Conversion[TableSwitchStmt, TableSwitch]     = TableSwitch(_)
+  given Conversion[NopStmt, Nop]                     = Nop(_)
+  given Conversion[ReturnStmt, Return]               = Return(_)
+  given Conversion[ReturnVoidStmt, ReturnVoid]       = ReturnVoid(_)
+  given Conversion[ThrowStmt, Throw]                 = Throw(_)
 }
 
+// ── Misc Syntax ───────────────────────────────────────────────────────────────
+
 object MiscSyntax {
-  implicit class ArrayReference(expr: ArrayRef) extends MiscSyntax {
+
+  class ArrayReference(val expr: ArrayRef) extends MiscSyntax {
     override def eval(scope: Scope) = {
-      val ArrayReference(base @ SLocal(_, _), index, _) = expr
+      val ArrayReference(base @ SLocal(_, _), index, _) = expr: @unchecked
       val immediate = for {
-        index <- index match {
-          case value @ SLocal(_, _) =>
-            catching(classOf[Throwable]) opt {
-              scope.local(value).asInstanceOf[Ints].value
-            }
-          case value: IntConstant => Some(value.value)
+        i <- index match {
+          case v @ SLocal(_, _) => catching(classOf[Throwable]) opt scope.local(v).asInstanceOf[Types.Ints].value
+          case v: IntConstant   => Some(v.value)
         }
-        value <- catching(classOf[Throwable]) opt scope.local(base).asInstanceOf[Arrays].value(index)
+        value <- catching(classOf[Throwable]) opt scope.local(base).asInstanceOf[Types.Arrays].value(i)
       } yield value
       debug("ArrayReference", s"$base($index) == $immediate")
       immediate -> scope
@@ -131,83 +145,129 @@ object MiscSyntax {
     def unapply(arg: ArrayRef) = Some(arg.getBase, arg.getIndex, arg.getType)
   }
 
-  implicit class NewArrayExpression(expr: NewArrayExpr) extends MiscSyntax {
+  class NewArrayExpression(val expr: NewArrayExpr) extends MiscSyntax {
     override def eval(scope: Scope) = {
-      val NewArrayExpression(typ, size) = expr
-      debug("NewArrayExpression", s"type:$typ size:$size")
-      Some(Arrays(mutable.Seq[Types]())) -> scope
+      debug("NewArrayExpression", s"type:${expr.getType} size:${expr.getSize}")
+      Some(Types.Arrays(mutable.Seq())) -> scope
     }
   }
 
-  object NewArrayExpression {
-    def unapply(arg: NewArrayExpr) = Some(arg.getType, arg.getSize)
-  }
-
-  implicit class NewMultiArrayExpression(expr: NewMultiArrayExpr) extends MiscSyntax {
+  class NewMultiArrayExpression(val expr: NewMultiArrayExpr) extends MiscSyntax {
     override def eval(scope: Scope) = {
-      val NewMultiArrayExpression(typ, sizes) = expr
-      debug("NewMultiArrayExpression", s"type:$typ sizes:$sizes")
-      Some(Arrays(mutable.Seq[Types]())) -> scope
+      debug("NewMultiArrayExpression", s"type:${expr.getType} sizes:${expr.getSizes}")
+      Some(Types.Arrays(mutable.Seq())) -> scope
     }
   }
 
-  object NewMultiArrayExpression {
-    def unapply(arg: NewMultiArrayExpr) = Some(arg.getType, arg.getSizes)
-  }
+  class NewExpression(val expr: NewExpr)                       extends MiscSyntax
+  class ArrayLengthExpression(val expr: LengthExpr)            extends MiscSyntax
+  class InstanceFieldReference(val expr: InstanceFieldRef)     extends MiscSyntax
+  class LocalReference(val expr: Local)                        extends MiscSyntax
+  class ParameterReference(val expr: ParameterRef)             extends MiscSyntax
+  class CaughtExceptionReference(val expr: CaughtExceptionRef) extends MiscSyntax
+  class ThisReference(val expr: ThisRef)                       extends MiscSyntax
+  class StaticFieldReference(val expr: StaticFieldRef)         extends MiscSyntax
+  class InstanceOfExpression(val expr: InstanceOfExpr)         extends MiscSyntax
 
-  implicit class NewExpression(expr: NewExpr)                       extends MiscSyntax
-  implicit class ArrayLengthExpression(expr: LengthExpr)            extends MiscSyntax
-  implicit class InstanceFieldReference(expr: InstanceFieldRef)     extends MiscSyntax
-  implicit class LocalReference(expr: Local)                        extends MiscSyntax
-  implicit class ParameterReference(expr: ParameterRef)             extends MiscSyntax
-  implicit class CaughtExceptionReference(expr: CaughtExceptionRef) extends MiscSyntax
-  implicit class ThisReference(expr: ThisRef)                       extends MiscSyntax
-  implicit class StaticFieldReference(expr: StaticFieldRef)         extends MiscSyntax
-  implicit class InstanceOfExpression(expr: InstanceOfExpr)         extends MiscSyntax
+  given Conversion[ArrayRef, ArrayReference]                     = ArrayReference(_)
+  given Conversion[NewArrayExpr, NewArrayExpression]             = NewArrayExpression(_)
+  given Conversion[NewMultiArrayExpr, NewMultiArrayExpression]   = NewMultiArrayExpression(_)
+  given Conversion[NewExpr, NewExpression]                       = NewExpression(_)
+  given Conversion[LengthExpr, ArrayLengthExpression]            = ArrayLengthExpression(_)
+  given Conversion[InstanceFieldRef, InstanceFieldReference]     = InstanceFieldReference(_)
+  given Conversion[Local, LocalReference]                        = LocalReference(_)
+  given Conversion[ParameterRef, ParameterReference]             = ParameterReference(_)
+  given Conversion[CaughtExceptionRef, CaughtExceptionReference] = CaughtExceptionReference(_)
+  given Conversion[ThisRef, ThisReference]                       = ThisReference(_)
+  given Conversion[StaticFieldRef, StaticFieldReference]         = StaticFieldReference(_)
+  given Conversion[InstanceOfExpr, InstanceOfExpression]         = InstanceOfExpression(_)
 }
+
+// ── Constants Syntax ──────────────────────────────────────────────────────────
 
 object ConstantsSyntax {
-  implicit class ApplyDoubles(expr: DoubleConstant)     extends ConstantsSyntax
-  implicit class ApplyLongs(expr: LongConstant)         extends ConstantsSyntax
-  implicit class ApplyInts(expr: IntConstant)           extends ConstantsSyntax
-  implicit class ApplyFloats(expr: FloatConstant)       extends ConstantsSyntax
-  implicit class ApplyNulls(expr: NullConstant)         extends ConstantsSyntax
-  implicit class ApplyStrings(expr: StringConstant)     extends ConstantsSyntax
-  implicit class ApplyClasses(expr: ClassConstant)      extends ConstantsSyntax
-  implicit class ApplyMethodHandles(expr: MethodHandle) extends ConstantsSyntax
+  class ApplyDoubles(val expr: DoubleConstant)     extends ConstantsSyntax
+  class ApplyLongs(val expr: LongConstant)         extends ConstantsSyntax
+  class ApplyInts(val expr: IntConstant)           extends ConstantsSyntax
+  class ApplyFloats(val expr: FloatConstant)       extends ConstantsSyntax
+  class ApplyNulls(val expr: NullConstant)         extends ConstantsSyntax
+  class ApplyStrings(val expr: StringConstant)     extends ConstantsSyntax
+  class ApplyClasses(val expr: ClassConstant)      extends ConstantsSyntax
+  class ApplyMethodHandles(val expr: MethodHandle) extends ConstantsSyntax
+
+  given Conversion[DoubleConstant, ApplyDoubles]     = ApplyDoubles(_)
+  given Conversion[LongConstant, ApplyLongs]         = ApplyLongs(_)
+  given Conversion[IntConstant, ApplyInts]           = ApplyInts(_)
+  given Conversion[FloatConstant, ApplyFloats]       = ApplyFloats(_)
+  given Conversion[NullConstant, ApplyNulls]         = ApplyNulls(_)
+  given Conversion[StringConstant, ApplyStrings]     = ApplyStrings(_)
+  given Conversion[ClassConstant, ApplyClasses]      = ApplyClasses(_)
+  given Conversion[MethodHandle, ApplyMethodHandles] = ApplyMethodHandles(_)
 }
+
+// ── Invoke Syntax ─────────────────────────────────────────────────────────────
 
 object InvokeSyntax {
-  implicit class InterfaceInvoke(expr: InterfaceInvokeExpr) extends InvokeSyntax
-  implicit class StaticInvoke(expr: StaticInvokeExpr)       extends InvokeSyntax
-  implicit class SpecialInvoke(expr: SpecialInvokeExpr)     extends InvokeSyntax
-  implicit class VirtualInvoke(expr: VirtualInvokeExpr)     extends InvokeSyntax
-  implicit class InstanceInvoke(expr: InstanceInvokeExpr)   extends InvokeSyntax
-  implicit class DynamicInvoke(expr: DynamicInvokeExpr)     extends InvokeSyntax
+  class InterfaceInvoke(val expr: InterfaceInvokeExpr) extends InvokeSyntax
+  class StaticInvoke(val expr: StaticInvokeExpr)       extends InvokeSyntax
+  class SpecialInvoke(val expr: SpecialInvokeExpr)     extends InvokeSyntax
+  class VirtualInvoke(val expr: VirtualInvokeExpr)     extends InvokeSyntax
+  class InstanceInvoke(val expr: InstanceInvokeExpr)   extends InvokeSyntax
+  class DynamicInvoke(val expr: DynamicInvokeExpr)     extends InvokeSyntax
+
+  given Conversion[InterfaceInvokeExpr, InterfaceInvoke] = InterfaceInvoke(_)
+  given Conversion[StaticInvokeExpr, StaticInvoke]       = StaticInvoke(_)
+  given Conversion[SpecialInvokeExpr, SpecialInvoke]     = SpecialInvoke(_)
+  given Conversion[VirtualInvokeExpr, VirtualInvoke]     = VirtualInvoke(_)
+  given Conversion[InstanceInvokeExpr, InstanceInvoke]   = InstanceInvoke(_)
+  given Conversion[DynamicInvokeExpr, DynamicInvoke]     = DynamicInvoke(_)
 }
 
+// ── Scalar Syntaxes ───────────────────────────────────────────────────────────
+
 object ScalarSyntaxes {
+
   object Bin {
     def unapply(arg: BinopExpr): Option[(Value, Value)] = Some(arg.getOp1, arg.getOp2)
   }
 
-  implicit class Add(add: AddExpr)    extends ScalarSyntaxes
-  implicit class Sub(sub: SubExpr)    extends ScalarSyntaxes
-  implicit class Mul(mul: MulExpr)    extends ScalarSyntaxes
-  implicit class Div(div: DivExpr)    extends ScalarSyntaxes
-  implicit class And(and: AndExpr)    extends ScalarSyntaxes
-  implicit class Cmp(cmp: CmpExpr)    extends ScalarSyntaxes
-  implicit class Cmpg(cmpg: CmpgExpr) extends ScalarSyntaxes
-  implicit class Eq(eq: EqExpr)       extends ScalarSyntaxes
-  implicit class Ge(ge: GeExpr)       extends ScalarSyntaxes
-  implicit class Gt(gt: GtExpr)       extends ScalarSyntaxes
-  implicit class Lt(lt: LtExpr)       extends ScalarSyntaxes
-  implicit class Le(le: LeExpr)       extends ScalarSyntaxes
-  implicit class Ne(ne: NeExpr)       extends ScalarSyntaxes
-  implicit class Rem(rem: RemExpr)    extends ScalarSyntaxes
-  implicit class Shl(shl: ShlExpr)    extends ScalarSyntaxes
-  implicit class Shr(shr: ShrExpr)    extends ScalarSyntaxes
-  implicit class Ushr(ushr: UshrExpr) extends ScalarSyntaxes
-  implicit class Xor(xor: XorExpr)    extends ScalarSyntaxes
-  implicit class Neg(neg: NegExpr)    extends ScalarSyntaxes
+  class Add(val add: AddExpr)    extends ScalarSyntaxes
+  class Sub(val sub: SubExpr)    extends ScalarSyntaxes
+  class Mul(val mul: MulExpr)    extends ScalarSyntaxes
+  class Div(val div: DivExpr)    extends ScalarSyntaxes
+  class And(val and: AndExpr)    extends ScalarSyntaxes
+  class Cmp(val cmp: CmpExpr)    extends ScalarSyntaxes
+  class Cmpg(val cmpg: CmpgExpr) extends ScalarSyntaxes
+  class Eq(val eq: EqExpr)       extends ScalarSyntaxes
+  class Ge(val ge: GeExpr)       extends ScalarSyntaxes
+  class Gt(val gt: GtExpr)       extends ScalarSyntaxes
+  class Lt(val lt: LtExpr)       extends ScalarSyntaxes
+  class Le(val le: LeExpr)       extends ScalarSyntaxes
+  class Ne(val ne: NeExpr)       extends ScalarSyntaxes
+  class Rem(val rem: RemExpr)    extends ScalarSyntaxes
+  class Shl(val shl: ShlExpr)    extends ScalarSyntaxes
+  class Shr(val shr: ShrExpr)    extends ScalarSyntaxes
+  class Ushr(val ushr: UshrExpr) extends ScalarSyntaxes
+  class Xor(val xor: XorExpr)    extends ScalarSyntaxes
+  class Neg(val neg: NegExpr)    extends ScalarSyntaxes
+
+  given Conversion[AddExpr, Add]    = Add(_)
+  given Conversion[SubExpr, Sub]    = Sub(_)
+  given Conversion[MulExpr, Mul]    = Mul(_)
+  given Conversion[DivExpr, Div]    = Div(_)
+  given Conversion[AndExpr, And]    = And(_)
+  given Conversion[CmpExpr, Cmp]    = Cmp(_)
+  given Conversion[CmpgExpr, Cmpg]  = Cmpg(_)
+  given Conversion[EqExpr, Eq]      = Eq(_)
+  given Conversion[GeExpr, Ge]      = Ge(_)
+  given Conversion[GtExpr, Gt]      = Gt(_)
+  given Conversion[LtExpr, Lt]      = Lt(_)
+  given Conversion[LeExpr, Le]      = Le(_)
+  given Conversion[NeExpr, Ne]      = Ne(_)
+  given Conversion[RemExpr, Rem]    = Rem(_)
+  given Conversion[ShlExpr, Shl]    = Shl(_)
+  given Conversion[ShrExpr, Shr]    = Shr(_)
+  given Conversion[UshrExpr, Ushr]  = Ushr(_)
+  given Conversion[XorExpr, Xor]    = Xor(_)
+  given Conversion[NegExpr, Neg]    = Neg(_)
 }

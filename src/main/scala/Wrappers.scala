@@ -1,29 +1,33 @@
 package side.effect.free
 
-import soot.jimple._
+import soot.jimple.*
 import soot.jimple.spark.pag.PAG
 import soot.jimple.toolkits.callgraph.{CallGraph, ContextSensitiveCallGraph, ReachableMethods}
 import soot.jimple.toolkits.pointer.SideEffectAnalysis
 import soot.options.Options
-import soot.tagkit._
+import soot.tagkit.*
 import soot.toolkits.exceptions.ThrowAnalysis
-import soot.util._
-import soot.{Unit => SootUnit, _}
+import soot.util.*
+import soot.{Unit => SootUnit, *}
 
 import java.io.File
 import java.nio.file.Path
-import scala.jdk.CollectionConverters._
+import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 object Wrappers {
 
-  private def ifToOption[T](condition: => Boolean, positiveResult: => T): Option[T] = if (condition) Some(positiveResult) else None
+  private def ifToOption[T](condition: => Boolean, positiveResult: => T): Option[T] =
+    if (condition) Some(positiveResult) else None
 
-  implicit class RichNumerable(val n: Numberable) extends AnyVal {
-    @inline def number: Int = n.getNumber
+  // ── Numberable ──────────────────────────────────────────────────────────────
 
-    @inline def number_=(newNumber: Int): Unit = n.setNumber(newNumber)
+  extension (n: Numberable) {
+    def number: Int                    = n.getNumber
+    def number_=(newNumber: Int): Unit = n.setNumber(newNumber)
   }
+
+  // ── SootClass ───────────────────────────────────────────────────────────────
 
   object SSootClass {
     def apply(
@@ -37,531 +41,371 @@ object Wrappers {
         annotations: Iterable[AnnotationTag] = Iterable()
     ): SootClass = {
       val sc = new SootClass(name, modifiers)
-      superClass.foreach(sc.superclass = _)
-      outerClass.foreach(sc.outerClass = _)
+      superClass.foreach(sc.setSuperclass)
+      outerClass.foreach(sc.setOuterClass)
       fields.foreach(sc.addField)
       interfaces.foreach(sc.addInterface)
       methods.foreach(sc.addMethod)
-      if (annotations.nonEmpty) {
-        sc.addTag(SVisibilityAnnotationTag(annotations))
-      }
+      if (annotations.nonEmpty) sc.addTag(SVisibilityAnnotationTag(annotations))
       sc
     }
   }
 
-  implicit class RichSootClass(val v: SootClass) extends AnyVal {
-    @inline def name = v.getName
-
-    @inline def name_=(newName: String) = v.setName(newName)
-
-    @inline def packageName: String = v.getPackageName
-
-    @inline def shortName: String = v.getShortName
-
-    @inline def modifiers: Int = v.getModifiers
-
-    @inline def modifiers_=(mods: Int) = v.setModifiers(mods)
-
-    @inline def fields: Chain[SootField] = v.getFields
-
-    @inline def fields_+=(newField: SootField) = v.addField(newField)
-
-    @inline def interfaces: Chain[SootClass] = v.getInterfaces
-
-    @inline def interfaces_=(interfaces: Iterable[SootClass]) = {
-      v.getInterfaces.foreach(v.removeInterface)
-      interfaces.foreach(v.addInterface)
+  extension (v: SootClass) {
+    def name: String                    = v.getName
+    def name_=(n: String): Unit         = v.setName(n)
+    def packageName: String             = v.getPackageName
+    def shortName: String               = v.getShortName
+    def modifiers: Int                  = v.getModifiers
+    def modifiers_=(m: Int): Unit       = v.setModifiers(m)
+    def fields: Chain[SootField]        = v.getFields
+    def fields_+=(f: SootField): Unit   = v.addField(f)
+    def interfaces: Chain[SootClass]    = v.getInterfaces
+    def interfaces_=(is: Iterable[SootClass]): Unit = {
+      v.getInterfaces.iterator().asScala.foreach(v.removeInterface)
+      is.foreach(v.addInterface)
     }
-
-    @inline def interfaces_+=(newInterface: SootClass) = v.addInterface(newInterface)
-
-    @inline def superclass: SootClass = v.getSuperclass
-
-    @inline def superclass_=(sc: SootClass) = v.setSuperclass(sc)
-
-    @inline def superClassOpt = ifToOption(v.hasSuperclass, v.getSuperclass)
-
-    @inline def methods = v.getMethods.asScala
-
-    @inline def methods_+=(newMethod: SootMethod) = v.addMethod(newMethod)
-
-    @inline def outerClass = v.getOuterClass
-
-    @inline def outerClass_=(sc: SootClass) = v.setOuterClass(sc)
-
-    @inline def outerClassOpt = ifToOption(v.hasOuterClass, v.getOuterClass)
-
-    @inline def typ = v.getType
-
-    @inline def typ_=(newTyp: RefType) = v.setRefType(newTyp)
-
-    @inline def field(subSignature: String) = v.getField(subSignature)
-
-    @inline def fieldOpt(subSignature: String) = Option(v.getFieldUnsafe(subSignature))
-
-    @inline def field(name: String, typ: Type) = v.getField(name, typ)
-
-    @inline def fieldOpt(name: String, typ: Type) = Option(v.getFieldUnsafe(name, typ))
-
-    @inline def fieldByName(name: String) = v.getFieldByName(name)
-
-    @inline def fieldByNameOpt(name: String) = Option(v.getFieldByNameUnsafe(name))
-
-    @inline def fieldsByName(name: String) = fields.filter(_.name == name)
-
-    @inline def methodsByName(name: String) = methods.filter(_.name == name)
-
-    @inline def methodByName(name: String) = v.getMethodByName(name)
-
-    @inline def methodByNameOpt(name: String) = Option(v.getMethodByNameUnsafe(name))
-
-    @inline def method(subSignature: String) = v.getMethod(subSignature)
-
-    @inline def methodOpt(subSignature: String) = Option(v.getMethodUnsafe(subSignature))
-
-    @inline def method(subSignature: NumberedString) = v.getMethod(subSignature)
-
-    @inline def methodOpt(subSignature: NumberedString) = Option(v.getMethodUnsafe(subSignature))
-
-    @inline def method(name: String, paramTypes: List[Type]) = v.getMethod(name, paramTypes.asJava)
-
-    @inline def methodOpt(name: String, paramTypes: Seq[Type]) = {
-      val paramJava = paramTypes.asJava
-      ifToOption(v.declaresMethod(name, paramJava), v.getMethod(name, paramJava))
+    def interfaces_+=(i: SootClass): Unit         = v.addInterface(i)
+    def superclass: SootClass                     = v.getSuperclass
+    def superclass_=(sc: SootClass): Unit         = v.setSuperclass(sc)
+    def superClassOpt: Option[SootClass]          = ifToOption(v.hasSuperclass, v.getSuperclass)
+    def methods: Iterable[SootMethod]             = v.getMethods.asScala
+    def methods_+=(m: SootMethod): Unit           = v.addMethod(m)
+    def outerClass: SootClass                     = v.getOuterClass
+    def outerClass_=(sc: SootClass): Unit         = v.setOuterClass(sc)
+    def outerClassOpt: Option[SootClass]          = ifToOption(v.hasOuterClass, v.getOuterClass)
+    def typ: RefType                              = v.getType
+    def typ_=(t: RefType): Unit                   = v.setRefType(t)
+    def field(subSig: String): SootField          = v.getField(subSig)
+    def fieldOpt(subSig: String): Option[SootField]           = Option(v.getFieldUnsafe(subSig))
+    def field(name: String, typ: Type): SootField             = v.getField(name, typ)
+    def fieldOpt(name: String, typ: Type): Option[SootField]  = Option(v.getFieldUnsafe(name, typ))
+    def fieldByName(name: String): SootField                  = v.getFieldByName(name)
+    def fieldByNameOpt(name: String): Option[SootField]       = Option(v.getFieldByNameUnsafe(name))
+    def fieldsByName(name: String): Iterable[SootField]       = v.getFields.asScala.filter(_.getName == name)
+    def methodsByName(name: String): Iterable[SootMethod]     = v.getMethods.asScala.filter(_.getName == name)
+    def methodByName(name: String): SootMethod                = v.getMethodByName(name)
+    def methodByNameOpt(name: String): Option[SootMethod]     = Option(v.getMethodByNameUnsafe(name))
+    def method(subSig: String): SootMethod                    = v.getMethod(subSig)
+    def methodOpt(subSig: String): Option[SootMethod]         = Option(v.getMethodUnsafe(subSig))
+    def method(subSig: NumberedString): SootMethod            = v.getMethod(subSig)
+    def methodOpt(subSig: NumberedString): Option[SootMethod] = Option(v.getMethodUnsafe(subSig))
+    def method(name: String, paramTypes: List[Type]): SootMethod = v.getMethod(name, paramTypes.asJava)
+    def methodOpt(name: String, paramTypes: Seq[Type]): Option[SootMethod] = {
+      val p = paramTypes.asJava
+      ifToOption(v.declaresMethod(name, p), v.getMethod(name, p))
     }
-
-    @inline def method(name: String, paramTypes: List[Type], retType: Type) = v.getMethod(name, paramTypes.asJava, retType)
-
-    @inline def methodOpt(name: String, paramTypes: List[Type], retType: Type) = Option(v.getMethodUnsafe(name, paramTypes.asJava, retType))
-
-    //Those have good getter APIs, but annoying setters
-    @inline def inScene_=(flag: Boolean) = v.setInScene(flag)
-
-    @inline def resolvingLevel_=(lvl: Int) = v.setResolvingLevel(lvl)
+    def method(name: String, paramTypes: List[Type], retType: Type): SootMethod =
+      v.getMethod(name, paramTypes.asJava, retType)
+    def methodOpt(name: String, paramTypes: List[Type], retType: Type): Option[SootMethod] =
+      Option(v.getMethodUnsafe(name, paramTypes.asJava, retType))
+    def inScene_=(flag: Boolean): Unit       = v.setInScene(flag)
+    def resolvingLevel_=(lvl: Int): Unit     = v.setResolvingLevel(lvl)
   }
 
-  implicit class RichCallGraph(val v: CallGraph) extends AnyVal {
-    @inline def callersOf(callee: SootMethod) = v.edgesInto(callee).asScala.map(_.getSrc.method())
+  // ── CallGraph ───────────────────────────────────────────────────────────────
 
-    @inline def calleesOf(callSite: SootUnit) = v.edgesOutOf(callSite).asScala.map(_.getTgt.method())
-
-    @inline def calleesFrom(method: SootMethod) = v.edgesOutOf(method).asScala.map(_.getTgt.method())
+  extension (v: CallGraph) {
+    def callersOf(callee: SootMethod)   = v.edgesInto(callee).asScala.map(_.getSrc.method())
+    def calleesOf(callSite: SootUnit)   = v.edgesOutOf(callSite).asScala.map(_.getTgt.method())
+    def calleesFrom(method: SootMethod) = v.edgesOutOf(method).asScala.map(_.getTgt.method())
   }
 
-  implicit class RichRefType(val v: RefType) extends AnyVal {
-    @inline def anySubType = v.getAnySubType
+  // ── RefType ─────────────────────────────────────────────────────────────────
 
-    @inline def anySubType_=(ast: AnySubType) = v.setAnySubType(ast)
-
-    @inline def arrayElementType = v.getArrayElementType
-
-    @inline def arrayType = v.getArrayType
-
-    @inline def arrayType_=(at: ArrayType) = v.setArrayType(at)
-
-    @inline def className = v.getClassName
-
-    @inline def className_=(cn: String) = v.setClassName(cn)
-
-    @inline def sootClass = v.getSootClass
-
-    @inline def sootClass_=(sc: SootClass) = v.setSootClass(sc)
-
-    @inline def number = v.getNumber
-
-    @inline def number_=(n: Int) = v.setNumber(n)
+  extension (v: RefType) {
+    def anySubType: AnySubType              = v.getAnySubType
+    def anySubType_=(ast: AnySubType): Unit = v.setAnySubType(ast)
+    def arrayElementType: Type              = v.getArrayElementType
+    def arrayType: ArrayType                = v.getArrayType
+    def arrayType_=(at: ArrayType): Unit    = v.setArrayType(at)
+    def className: String                   = v.getClassName
+    def className_=(cn: String): Unit       = v.setClassName(cn)
+    def sootClass: SootClass                = v.getSootClass
+    def sootClass_=(sc: SootClass): Unit    = v.setSootClass(sc)
   }
 
-  implicit class RichClassMember(val c: ClassMember) extends AnyVal {
-    @inline def declaringClass = c.getDeclaringClass
+  // ── ClassMember ─────────────────────────────────────────────────────────────
 
-    @inline def modifiers = c.getModifiers
-
-    @inline def modifiers_=(mods: Int) = c.setModifiers(mods)
-
-    @inline def phantom_=(flag: Boolean) = c.setPhantom(flag)
+  extension (c: ClassMember) {
+    def declaringClass: SootClass       = c.getDeclaringClass
+    def modifiers: Int                  = c.getModifiers
+    def modifiers_=(m: Int): Unit       = c.setModifiers(m)
+    def phantom_=(flag: Boolean): Unit  = c.setPhantom(flag)
   }
 
-  implicit class RichSootField(val v: SootField) extends AnyVal {
-    @inline def name = v.getName
+  // ── SootField ───────────────────────────────────────────────────────────────
 
-    @inline def name_=(newName: String) = v.setName(newName)
-
-    @inline def declaringClass = v.getDeclaringClass
-
-    @inline def signature = v.getSignature
-
-    @inline def subSignature = v.getSubSignature
-
-    @inline def declaration = v.getDeclaration
-
-    /** @return A field signature that is formatted a bit different than the Soot signature.
-      *         It consists of the class' name, followed by '.' and the field name.
-      */
-    @inline def quasiSignature = v.getDeclaringClass.getName + "." + v.getName
-
-    @inline def typ = v.getType
+  extension (v: SootField) {
+    def name: String           = v.getName
+    def name_=(n: String): Unit = v.setName(n)
+    def signature: String      = v.getSignature
+    def subSignature: String   = v.getSubSignature
+    def declaration: String    = v.getDeclaration
+    def quasiSignature: String = v.getDeclaringClass.getName + "." + v.getName
+    def typ: Type              = v.getType
   }
 
-  implicit class RichSootMethod(val v: SootMethod) extends AnyVal {
-    @inline def isClinit = v.getName == "<clinit>"
+  // ── SootMethod ──────────────────────────────────────────────────────────────
 
-    @inline def name = v.getName
-
-    @inline def name_=(newName: String) = v.setName(newName)
-
-    @inline def declared = v.isDeclared
-
-    @inline def declared_=(flag: Boolean) = v.setDeclared(true)
-
-    @inline def signature = v.getSignature
-
-    @inline def subSignature = v.getSubSignature
-
-    @inline def body = v.retrieveActiveBody()
-
-    @inline def body_=(body: Body) = v.setActiveBody(body)
-
-    @inline def bodyOpt: Option[Body] = ifToOption(v.hasActiveBody, v.getActiveBody)
-
-    @inline def source = v.getSource
-
-    @inline def source_=(ms: MethodSource) = v.setSource(ms)
-
-    @inline def parameterCount = v.getParameterCount
-
-    @inline def parameterTypes = v.getParameterTypes.asScala
-
-    @inline def parameterTypes_=(newPt: Seq[Type]) = v.setParameterTypes(newPt.asJava)
-
-    @inline def exceptions = v.getExceptions.asScala
-
-    @inline def exceptions_=(newEx: Seq[SootClass]) = v.setExceptions(newEx.asJava)
-
-    @inline def returnType = v.getReturnType
-
-    @inline def returnType_=(typ: Type) = v.setReturnType(typ)
-
-    @inline def declaringClass = v.getDeclaringClass
-
-    @inline def declaringClass_=(sc: SootClass): Unit = {
-      v.setDeclaringClass(sc)
-      v.setDeclared(true)
-    }
-
-    @inline def locals = if (v.hasActiveBody) v.body.getLocals else new HashChain[Local]()
-
-    @inline def units = if (v.hasActiveBody) v.body.getUnits else new HashChain[SootUnit]()
-
-    @inline def statements = if (v.hasActiveBody) v.body.units.asInstanceOf[Chain[Stmt]] else new HashChain[Stmt]()
-
-    @inline def numberedSignature = v.getNumberedSubSignature
-
-    @inline def paramLocals = for (i <- 0 until v.getParameterCount; bod <- v.bodyOpt) yield bod.getParameterLocal(i)
+  extension (v: SootMethod) {
+    def isClinit: Boolean                    = v.getName == "<clinit>"
+    def name: String                         = v.getName
+    def name_=(n: String): Unit              = v.setName(n)
+    def declared: Boolean                    = v.isDeclared
+    def declared_=(flag: Boolean): Unit      = v.setDeclared(true)
+    def signature: String                    = v.getSignature
+    def subSignature: String                 = v.getSubSignature
+    def body: Body                           = v.retrieveActiveBody()
+    def body_=(b: Body): Unit                = v.setActiveBody(b)
+    def bodyOpt: Option[Body]                = ifToOption(v.hasActiveBody, v.getActiveBody)
+    def source: MethodSource                 = v.getSource
+    def source_=(ms: MethodSource): Unit     = v.setSource(ms)
+    def parameterCount: Int                  = v.getParameterCount
+    def parameterTypes: Iterable[Type]       = v.getParameterTypes.asScala
+    def parameterTypes_=(pt: Seq[Type]): Unit = v.setParameterTypes(pt.asJava)
+    def exceptions: Iterable[SootClass]      = v.getExceptions.asScala
+    def exceptions_=(ex: Seq[SootClass]): Unit = v.setExceptions(ex.asJava)
+    def returnType: Type                     = v.getReturnType
+    def returnType_=(t: Type): Unit          = v.setReturnType(t)
+    def declaringClass: SootClass            = v.getDeclaringClass
+    def declaringClass_=(sc: SootClass): Unit = { v.setDeclaringClass(sc); v.setDeclared(true) }
+    def locals: Chain[Local]                 = if (v.hasActiveBody) v.body.getLocals else new HashChain[Local]()
+    def units: Chain[SootUnit]               = if (v.hasActiveBody) v.body.getUnits else new HashChain[SootUnit]()
+    def statements: Chain[Stmt]              = if (v.hasActiveBody) v.body.getUnits.asInstanceOf[Chain[Stmt]] else new HashChain[Stmt]()
+    def numberedSignature: NumberedString    = v.getNumberedSubSignature
+    def paramLocals: Seq[Local]              = for (i <- 0 until v.getParameterCount; b <- v.bodyOpt) yield b.getParameterLocal(i)
   }
 
-  implicit class RichSootMethodRef(val v: SootMethodRef) extends AnyVal {
-    @inline def isClinit = v.getName == "<clinit>"
+  // ── SootMethodRef ───────────────────────────────────────────────────────────
 
-    @inline def signature = v.getSignature
-
-    @inline def subSignature = v.getSubSignature.getString
-
-    @inline def paramTypes = v.getParameterTypes.asScala
+  extension (v: SootMethodRef) {
+    def isClinit: Boolean          = v.getName == "<clinit>"
+    def signature: String          = v.getSignature
+    def subSignature: String       = v.getSubSignature.getString
+    def paramTypes: Iterable[Type] = v.getParameterTypes.asScala
   }
 
-  implicit class RichTrap(val v: Trap) extends AnyVal {
-    @inline def beginUnit = v.getBeginUnit
+  // ── Trap ────────────────────────────────────────────────────────────────────
 
-    @inline def beginUnit_=(newU: SootUnit) = v.setBeginUnit(newU)
-
-    @inline def beginStmt = v.getBeginUnit.asInstanceOf[Stmt]
-
-    @inline def endUnit = v.getEndUnit
-
-    @inline def endUnit_=(newU: SootUnit) = v.setEndUnit(newU)
-
-    @inline def endStmt = v.getEndUnit.asInstanceOf[Stmt]
-
-    @inline def exception = v.getException
-
-    @inline def exception_=(sc: SootClass) = v.setException(sc)
-
-    @inline def handlerUnit = v.getHandlerUnit
-
-    @inline def handlerUnit_=(newU: SootUnit) = v.setHandlerUnit(newU)
-
-    @inline def handlerStmt = v.getHandlerUnit.asInstanceOf[Stmt]
+  extension (v: Trap) {
+    def beginUnit: SootUnit               = v.getBeginUnit
+    def beginUnit_=(u: SootUnit): Unit    = v.setBeginUnit(u)
+    def beginStmt: Stmt                   = v.getBeginUnit.asInstanceOf[Stmt]
+    def endUnit: SootUnit                 = v.getEndUnit
+    def endUnit_=(u: SootUnit): Unit      = v.setEndUnit(u)
+    def endStmt: Stmt                     = v.getEndUnit.asInstanceOf[Stmt]
+    def exception: SootClass              = v.getException
+    def exception_=(sc: SootClass): Unit  = v.setException(sc)
+    def handlerUnit: SootUnit             = v.getHandlerUnit
+    def handlerUnit_=(u: SootUnit): Unit  = v.setHandlerUnit(u)
+    def handlerStmt: Stmt                 = v.getHandlerUnit.asInstanceOf[Stmt]
   }
 
-  implicit class RichBody(val v: Body) extends AnyVal {
-    @inline def units = v.getUnits
+  // ── Body ────────────────────────────────────────────────────────────────────
 
-    @inline def statements = v.getUnits.asInstanceOf[PatchingChain[Stmt]]
-
-    @inline def locals = v.getLocals
-
-    @inline def method = v.getMethod
-
-    @inline def thisLocal = Try(v.getThisLocal).toOption
-
-    @inline def parameterLocal(i: Int) = v.getParameterLocal(i)
-
-    @inline def traps = v.getTraps
-
-    @inline def parameterLocals = v.getParameterLocals.asScala
-
-    @inline def sources = units.map(it => s"  ${it.toString()} // L${it.lineNumberOpt.getOrElse("0")}").mkString(s"$method {\n", "\n", "\n}")
+  extension (v: Body) {
+    def units: Chain[SootUnit]              = v.getUnits
+    def statements: PatchingChain[Stmt]     = v.getUnits.asInstanceOf[PatchingChain[Stmt]]
+    def locals: Chain[Local]                = v.getLocals
+    def method: SootMethod                  = v.getMethod
+    def thisLocal: Option[Local]            = Try(v.getThisLocal).toOption
+    def parameterLocal(i: Int): Local       = v.getParameterLocal(i)
+    def traps: Chain[Trap]                  = v.getTraps
+    def parameterLocals: Iterable[Local]    = v.getParameterLocals.asScala
+    def sources: String = v.getUnits.asScala
+      .map(it => s"  ${it.toString()} // L${it.lineNumberOpt.getOrElse("0")}")
+      .mkString(s"$v.getMethod {\n", "\n", "\n}")
   }
+
+  // ── Stmt ────────────────────────────────────────────────────────────────────
 
   object SStmt {
     def unapply(stmt: Stmt): Option[(Option[InvokeExpr], Option[ArrayRef], Option[FieldRef])] =
       Some(stmt.invokeExprOpt, stmt.arrayRefOpt, stmt.fieldRefOpt)
   }
 
-  implicit class RichStmt(val v: Stmt) extends AnyVal {
-    @inline def invokeExpr = v.getInvokeExpr
-
-    @inline def invokeExprOpt = ifToOption(v.containsInvokeExpr(), v.getInvokeExpr)
-
-    @inline def arrayRef = v.getArrayRef
-
-    @inline def arrayRefOpt = ifToOption(v.containsArrayRef(), v.getArrayRef)
-
-    @inline def fieldRef = v.getFieldRef
-
-    @inline def fieldRefOpt = ifToOption(v.containsFieldRef(), v.getFieldRef)
+  extension (v: Stmt) {
+    def invokeExpr: InvokeExpr              = v.getInvokeExpr
+    def invokeExprOpt: Option[InvokeExpr]   = ifToOption(v.containsInvokeExpr(), v.getInvokeExpr)
+    def arrayRef: ArrayRef                  = v.getArrayRef
+    def arrayRefOpt: Option[ArrayRef]       = ifToOption(v.containsArrayRef(), v.getArrayRef)
+    def fieldRef: FieldRef                  = v.getFieldRef
+    def fieldRefOpt: Option[FieldRef]       = ifToOption(v.containsFieldRef(), v.getFieldRef)
   }
+
+  // ── IfStmt ──────────────────────────────────────────────────────────────────
 
   object SIfStmt {
     def unapply(stmt: IfStmt): Option[(Value, Stmt)] = Some(stmt.condition, stmt.target)
   }
 
-  implicit class RichIfStmt(val v: IfStmt) extends AnyVal {
-    @inline def condition = v.getCondition
-
-    @inline def target = v.getTarget
+  extension (v: IfStmt) {
+    def condition: Value = v.getCondition
+    def target: Stmt     = v.getTarget
   }
+
+  // ── BinopExpr ───────────────────────────────────────────────────────────────
 
   object SBinopExpr {
     def unapply(expr: BinopExpr): Option[(Value, Value)] = Some(expr.left, expr.right)
   }
 
-  implicit class RichBinopExpr(val v: BinopExpr) extends AnyVal {
-    @inline def left = v.getOp1
-
-    @inline def right = v.getOp2
+  extension (v: BinopExpr) {
+    def left: Value  = v.getOp1
+    def right: Value = v.getOp2
   }
 
   object SEqExpr {
     def unapply(exp: EqExpr): Option[(Value, Value)] = Some(exp.left, exp.right)
   }
 
-  implicit class RichFastHierarchy(val v: FastHierarchy) extends AnyVal {
-    @inline def abstractDispatch(sm: SootMethod) = v.resolveAbstractDispatch(sm.getDeclaringClass, sm).asScala.toSet
+  // ── FastHierarchy ───────────────────────────────────────────────────────────
 
-    @inline def interfaceImplementers(sc: SootClass) = if (sc.isInterface) v.getAllImplementersOfInterface(sc).asScala.toSet else Set[SootClass]()
-
-    @inline def subClassesOf(sc: SootClass) = v.getSubclassesOf(sc).asScala.toSet
-
-    @inline def allSubinterfaces(sc: SootClass) = v.getAllSubinterfaces(sc).asScala.toSet
+  extension (v: FastHierarchy) {
+    def abstractDispatch(sm: SootMethod)    = v.resolveAbstractDispatch(sm.getDeclaringClass, sm).asScala.toSet
+    def interfaceImplementers(sc: SootClass) = if (sc.isInterface) v.getAllImplementersOfInterface(sc).asScala.toSet else Set[SootClass]()
+    def subClassesOf(sc: SootClass)         = v.getSubclassesOf(sc).asScala.toSet
+    def allSubinterfaces(sc: SootClass)     = v.getAllSubinterfaces(sc).asScala.toSet
   }
 
-  implicit class RichScene(val v: Scene) extends AnyVal {
+  // ── Scene ───────────────────────────────────────────────────────────────────
 
-    @inline def applicationClasses = v.getApplicationClasses.asScala
-
-    @inline def classes = v.getClasses.asScala
-
-    @inline def libraryClasses = v.getLibraryClasses.asScala
-
-    @inline def phantomClasses = v.getPhantomClasses.asScala
-
-    @inline def field(fieldSpec: String) = v.getField(fieldSpec)
-
-    @inline def fieldOpt(fieldSpec: String) = ifToOption(v.containsField(fieldSpec), v.getField(fieldSpec))
-
-    @inline def fieldRef(fieldSpec: String) = v.getField(fieldSpec).makeRef()
-
-    @inline def fieldRefOpt(fieldSpec: String) = ifToOption(v.containsField(fieldSpec), v.getField(fieldSpec).makeRef())
-
-    @inline def refType(className: String) = v.getRefType(className)
-
-    @inline def refTypeOpt(className: String) = ifToOption(v.containsType(className), v.getRefType(className))
-
-    @inline def sootClass(className: String) = v.getSootClass(className)
-
-    @inline def sootClassOpt(className: String): Option[SootClass] = Option(v.getSootClassUnsafe(className))
-
-    @inline def method(sig: String) = v.getMethod(sig)
-
-    @inline def methodOpt(sig: String) = ifToOption(v.containsMethod(sig), v.getMethod(sig))
-
-    @inline def methodRef(sig: String) = v.getMethod(sig).makeRef()
-
-    @inline def methodRefOpt(sig: String): Option[SootMethodRef] = ifToOption(v.containsMethod(sig), v.getMethod(sig).makeRef())
-
-    @inline def objectType = v.getObjectType
-
-    @inline def objectClass = v.getObjectType.getSootClass
-
-    @inline def hierarchy = v.getActiveHierarchy
-
-    @inline def hierarchy_=(h: Hierarchy) = v.setActiveHierarchy(h)
-
-    @inline def fastHierarchy = v.getOrMakeFastHierarchy
-
-    @inline def fastHierarchy_=(fh: FastHierarchy) = v.setFastHierarchy(fh)
-
-    @inline def callGraph = v.getCallGraph
-
-    @inline def callGraph_=(cg: CallGraph) = v.setCallGraph(cg)
-
-    @inline def contextNumberer = v.getContextNumberer
-
-    @inline def contextNumberer_=(cn: Numberer[Context]) = v.setContextNumberer(cn)
-
-    @inline def contextSensitiveCallGraph = v.getContextSensitiveCallGraph
-
-    @inline def contextSensitiveCallGraph_=(cscg: ContextSensitiveCallGraph) = v.setContextSensitiveCallGraph(cscg)
-
-    @inline def defaultThrowAnalysis = v.getDefaultThrowAnalysis
-
-    @inline def defaultThrowAnalysis_=(ta: ThrowAnalysis) = v.setDefaultThrowAnalysis(ta)
-
-    @inline def entryPoints = v.getEntryPoints.asScala
-
-    @inline def entryPoints_=(ep: Seq[SootMethod]) = v.setEntryPoints(ep.asJava)
-
-    @inline def mainClass = v.getMainClass
-
-    @inline def mainClass_=(sc: SootClass) = v.setMainClass(sc)
-
-    @inline def mainMethod = v.getMainMethod
-
-    @inline def mainMethod_=(sm: SootMethod): Unit = v.setMainClass(sm.declaringClass)
-
-    @inline def phantomRefs = v.getPhantomRefs
-
-    @inline def phantomRefs_=(flag: Boolean) = v.setPhantomRefs(flag)
-
-    @inline def pkgList = v.getPkgList.asScala
-
-    @inline def pkgList_=(pl: Seq[String]) = v.setPkgList(pl.asJava)
-
-    @inline def pta = v.getPointsToAnalysis
-
-    @inline def pointsToAnalysis = v.getPointsToAnalysis
-
-    @inline def pointsToAnalysis_=(pta: PointsToAnalysis) = v.setPointsToAnalysis(pta)
-
-    @inline def pag = v.getPointsToAnalysis.asInstanceOf[PAG]
-
-    @inline def sootClassPath = v.getSootClassPath
-
-    @inline def sootClassPath_=(scp: String) = v.setSootClassPath(scp)
-
-    @inline def reachableMethods = v.getReachableMethods
-
-    @inline def reachableMethods_=(rm: ReachableMethods) = v.setReachableMethods(rm)
-
-    @inline def sideEffectAnalysis = v.getSideEffectAnalysis
-
-    @inline def sideEffectAnalysis_=(sea: SideEffectAnalysis) = v.setSideEffectAnalysis(sea)
-
-    @inline def reservedNames = v.getReservedNames.asScala.toSet
-
+  extension (v: Scene) {
+    def applicationClasses: Iterable[SootClass]   = v.getApplicationClasses.asScala
+    def classes: Iterable[SootClass]              = v.getClasses.asScala
+    def libraryClasses: Iterable[SootClass]        = v.getLibraryClasses.asScala
+    def phantomClasses: Iterable[SootClass]        = v.getPhantomClasses.asScala
+    def field(spec: String): SootField             = v.getField(spec)
+    def fieldOpt(spec: String): Option[SootField]  = ifToOption(v.containsField(spec), v.getField(spec))
+    def fieldRef(spec: String): SootFieldRef       = v.getField(spec).makeRef()
+    def fieldRefOpt(spec: String): Option[SootFieldRef] = ifToOption(v.containsField(spec), v.getField(spec).makeRef())
+    def refType(name: String): RefType             = v.getRefType(name)
+    def refTypeOpt(name: String): Option[RefType]  = ifToOption(v.containsType(name), v.getRefType(name))
+    def sootClass(name: String): SootClass         = v.getSootClass(name)
+    def sootClassOpt(name: String): Option[SootClass] = Option(v.getSootClassUnsafe(name))
+    def method(sig: String): SootMethod            = v.getMethod(sig)
+    def methodOpt(sig: String): Option[SootMethod] = ifToOption(v.containsMethod(sig), v.getMethod(sig))
+    def methodRef(sig: String): SootMethodRef      = v.getMethod(sig).makeRef()
+    def methodRefOpt(sig: String): Option[SootMethodRef] = ifToOption(v.containsMethod(sig), v.getMethod(sig).makeRef())
+    def objectType: RefType                        = v.getObjectType
+    def objectClass: SootClass                     = v.getObjectType.getSootClass
+    def hierarchy: Hierarchy                       = v.getActiveHierarchy
+    def hierarchy_=(h: Hierarchy): Unit            = v.setActiveHierarchy(h)
+    def fastHierarchy: FastHierarchy               = v.getOrMakeFastHierarchy
+    def fastHierarchy_=(fh: FastHierarchy): Unit   = v.setFastHierarchy(fh)
+    def callGraph: CallGraph                       = v.getCallGraph
+    def callGraph_=(cg: CallGraph): Unit           = v.setCallGraph(cg)
+    def contextNumberer: Numberer[Context]         = v.getContextNumberer
+    def contextNumberer_=(cn: Numberer[Context]): Unit = v.setContextNumberer(cn)
+    def contextSensitiveCallGraph: ContextSensitiveCallGraph = v.getContextSensitiveCallGraph
+    def contextSensitiveCallGraph_=(cscg: ContextSensitiveCallGraph): Unit = v.setContextSensitiveCallGraph(cscg)
+    def defaultThrowAnalysis: ThrowAnalysis        = v.getDefaultThrowAnalysis
+    def defaultThrowAnalysis_=(ta: ThrowAnalysis): Unit = v.setDefaultThrowAnalysis(ta)
+    def entryPoints: Iterable[SootMethod]          = v.getEntryPoints.asScala
+    def entryPoints_=(ep: Seq[SootMethod]): Unit   = v.setEntryPoints(ep.asJava)
+    def mainClass: SootClass                       = v.getMainClass
+    def mainClass_=(sc: SootClass): Unit           = v.setMainClass(sc)
+    def mainMethod: SootMethod                     = v.getMainMethod
+    def mainMethod_=(sm: SootMethod): Unit         = v.setMainClass(sm.getDeclaringClass)
+    def phantomRefs: Boolean                       = v.getPhantomRefs
+    def phantomRefs_=(flag: Boolean): Unit         = v.setPhantomRefs(flag)
+    def pkgList: Iterable[String]                  = v.getPkgList.asScala
+    def pkgList_=(pl: Seq[String]): Unit           = v.setPkgList(pl.asJava)
+    def pta: PointsToAnalysis                      = v.getPointsToAnalysis
+    def pointsToAnalysis: PointsToAnalysis         = v.getPointsToAnalysis
+    def pointsToAnalysis_=(p: PointsToAnalysis): Unit = v.setPointsToAnalysis(p)
+    def pag: PAG                                   = v.getPointsToAnalysis.asInstanceOf[PAG]
+    def sootClassPath: String                      = v.getSootClassPath
+    def sootClassPath_=(scp: String): Unit         = v.setSootClassPath(scp)
+    def reachableMethods: ReachableMethods         = v.getReachableMethods
+    def reachableMethods_=(rm: ReachableMethods): Unit = v.setReachableMethods(rm)
+    def sideEffectAnalysis: SideEffectAnalysis     = v.getSideEffectAnalysis
+    def sideEffectAnalysis_=(sea: SideEffectAnalysis): Unit = v.setSideEffectAnalysis(sea)
+    def reservedNames: Set[String]                 = v.getReservedNames.asScala.toSet
   }
 
-  implicit class RichChain[E](val v: Chain[E]) extends Iterable[E] {
-    def ++=(elems: Seq[E]) = v.addAll(elems.asJava)
+  // ── Chain ───────────────────────────────────────────────────────────────────
 
-    def +=(elem: E) = v.addLast(elem)
-
+  class RichChain[E](val v: Chain[E]) extends Iterable[E] {
+    def ++=(elems: Seq[E]): Unit       = v.addAll(elems.asJava)
+    def +=(elem: E): Unit              = v.addLast(elem)
     override def iterator: Iterator[E] = v.iterator().asScala
   }
 
-  implicit class RichHost(val v: Host) extends AnyVal {
-    @inline def tags = v.getTags.asScala
+  given [E]: Conversion[Chain[E], RichChain[E]] = RichChain(_)
 
-    @inline def tag(aName: String) = v.getTag(aName)
+  // ── Host ────────────────────────────────────────────────────────────────────
 
-    @inline def tagOpt(aName: String): Option[Tag] = Option(v.getTag(aName))
-
-    //This is dirty, but I can't think of a much better way without defaulting to `tagOpt(String)`
-    //http://failex.blogspot.ca/2013/06/fake-theorems-for-free.html
-    @inline def tagOpt[T <: Tag](typ: Class[T]): Option[T] = v.tags.find(t => t.getClass eq typ).map(_.asInstanceOf[T])
-
-    /** Returns -1 if the annotation is missing */
-    @inline def lineNumber = v.getJavaSourceStartLineNumber
-
-    @inline def lineNumberOpt: Option[Int] = v.getJavaSourceStartLineNumber match {
+  extension (v: Host) {
+    def tags: Iterable[Tag]                       = v.getTags.asScala
+    def tag(name: String): Tag                    = v.getTag(name)
+    def tagOpt(name: String): Option[Tag]         = Option(v.getTag(name))
+    def tagOpt[T <: Tag](typ: Class[T]): Option[T] = v.getTags.asScala.find(_.getClass eq typ).map(_.asInstanceOf[T])
+    def lineNumber: Int                           = v.getJavaSourceStartLineNumber
+    def lineNumberOpt: Option[Int]                = v.getJavaSourceStartLineNumber match {
       case -1  => None
       case any => Some(any)
     }
-
   }
+
+  // ── VisibilityAnnotationTag ─────────────────────────────────────────────────
 
   object SVisibilityAnnotationTag {
-    def apply(annotations: AnnotationTag*) = {
-      val annotationTag = new VisibilityAnnotationTag(0)
-      annotations.foreach(annotationTag.addAnnotation)
-      annotationTag
+    def apply(annotations: AnnotationTag*): VisibilityAnnotationTag = {
+      val tag = new VisibilityAnnotationTag(0)
+      annotations.foreach(tag.addAnnotation)
+      tag
     }
-
-    def apply(annotations: Iterable[AnnotationTag]) = {
-      val annotationTag = new VisibilityAnnotationTag(0)
-      annotations.foreach(annotationTag.addAnnotation)
-      annotationTag
+    def apply(annotations: Iterable[AnnotationTag]): VisibilityAnnotationTag = {
+      val tag = new VisibilityAnnotationTag(0)
+      annotations.foreach(tag.addAnnotation)
+      tag
     }
-
-    def unapply(vat: VisibilityAnnotationTag) = vat.annotations
+    def unapply(vat: VisibilityAnnotationTag) = vat.getAnnotations.asScala
   }
 
-  implicit class RichVisibilityAnnotationTag(val v: VisibilityAnnotationTag) extends AnyVal {
-    @inline def annotations = v.getAnnotations.asScala
+  extension (v: VisibilityAnnotationTag) {
+    def annotations: Iterable[AnnotationTag] = v.getAnnotations.asScala
   }
+
+  // ── AnnotationTag ───────────────────────────────────────────────────────────
 
   object SAnnotationTag {
     def apply(name: String, elements: Seq[AnnotationElem] = Seq()) = new AnnotationTag(name, elements.asJava)
-
-    /** @param at the `AnnotationTag`
-      * @return a tuple with (annotation name, information, elements)
-      */
-    def unapply(at: AnnotationTag) = Some(at.name, at.info, at.elements)
+    def unapply(at: AnnotationTag) = Some(at.getName, at.getInfo, at.getElems.asScala)
   }
 
   object SAnnotationStringElem {
     def apply(name: String, value: String) = new AnnotationStringElem(value, 's', name)
   }
 
-  implicit class RichAnnotationTag(val v: AnnotationTag) extends AnyVal {
-    @inline def elements = v.getElems.asScala
-
-    @inline def info = v.getInfo
-
-    @inline def name = v.getName
+  extension (v: AnnotationTag) {
+    def elements: Iterable[AnnotationElem] = v.getElems.asScala
+    def info: String                       = v.getInfo
+    def name: String                       = v.getName
   }
+
+  // ── AnnotationElem ──────────────────────────────────────────────────────────
 
   object SAnnotationElem {
-    def unapply(ae: AnnotationElem) = Some(ae.name, ae.kind)
+    def unapply(ae: AnnotationElem) = Some(ae.getName, ae.getKind)
   }
 
-  implicit class RichAnnotationElement(val v: AnnotationElem) extends AnyVal {
-    @inline def kind = v.getKind
-
-    @inline def name = v.getName
+  extension (v: AnnotationElem) {
+    def kind: Char   = v.getKind
+    def name: String = v.getName
   }
 
-  implicit class RichValue(private val v: Value) extends AnyVal {
-    @inline def useBoxes = v.getUseBoxes.asScala.toSeq
+  // ── Value ───────────────────────────────────────────────────────────────────
+
+  extension (v: Value) {
+    def useBoxes: Seq[ValueBox] = v.getUseBoxes.asScala.toSeq
   }
+
+  // ── InvokeExpr ──────────────────────────────────────────────────────────────
 
   object SInvokeExpr {
-
-    /** @param expr the expression
-      * @return a tuple with (an `Option` to the base variable, the sequence of arguments, the target method)
-      */
     def unapply(expr: InvokeExpr) = expr match {
       case SStaticInvokeExpr(args, method)         => Some(None, args, method)
       case SInstanceInvokeExpr(base, args, method) => Some(Some(base), args, method)
@@ -569,362 +413,183 @@ object Wrappers {
     }
   }
 
-  implicit class RichInvokeExpr(val v: InvokeExpr) extends AnyVal {
-    @inline def args = v.getArgs.asScala
-
-    @inline def arg(index: Int) = v.getArg(index)
-
-    @inline def argCount = v.getArgCount
-
-    @inline def method = v.getMethod
-
-    //In some modes, this getMethod throw an exception. In others, it merely returns false.
-    //So we handle both those cases with Try and Option together. The actual exception gets lost
-    //in the process, but that's probably not a big deal
-    @inline def methodOpt = Try(Option(v.getMethod)).getOrElse(None)
-
-    @inline def methodRef = v.getMethodRef
-
-    @inline def returnType = v.getType
+  extension (v: InvokeExpr) {
+    def args: Iterable[Value]         = v.getArgs.asScala
+    def arg(index: Int): Value        = v.getArg(index)
+    def argCount: Int                 = v.getArgCount
+    def method: SootMethod            = v.getMethod
+    def methodOpt: Option[SootMethod] = Try(Option(v.getMethod)).getOrElse(None)
+    def methodRef: SootMethodRef      = v.getMethodRef
+    def returnType: Type              = v.getType
   }
+
+  // ── StaticInvokeExpr ────────────────────────────────────────────────────────
 
   object SStaticInvokeExpr {
-    def apply(args: Seq[Value], target: SootMethod): StaticInvokeExpr = Jimple.v.newStaticInvokeExpr(target.makeRef(), args.asJava)
-
-    /** @param expr the expression
-      * @return a tuple with (the sequence of arguments, the target method)
-      */
-    def unapply(expr: StaticInvokeExpr) = Some(expr.args, expr.method)
+    def apply(args: Seq[Value], target: SootMethod): StaticInvokeExpr =
+      Jimple.v.newStaticInvokeExpr(target.makeRef(), args.asJava)
+    def unapply(expr: StaticInvokeExpr) = Some(expr.getArgs.asScala, expr.getMethod)
   }
+
+  // ── InstanceInvokeExpr ──────────────────────────────────────────────────────
 
   object SInstanceInvokeExpr {
-    def apply(base: Local, args: Seq[Value], target: SootMethod): InstanceInvokeExpr = target.declaringClass match {
-      case interface if interface.isInterface => Jimple.v.newInterfaceInvokeExpr(base, target.makeRef(), args.asJava)
-      case _                                  => Jimple.v.newVirtualInvokeExpr(base, target.makeRef(), args.asJava)
-    }
-
-    /** @param expr the expression
-      * @return a tuple with (the base variable, the sequence of arguments, the target method)
-      */
-    def unapply(expr: InstanceInvokeExpr) = Some(expr.base, expr.args, expr.method)
+    def apply(base: Local, args: Seq[Value], target: SootMethod): InstanceInvokeExpr =
+      target.getDeclaringClass match {
+        case iface if iface.isInterface => Jimple.v.newInterfaceInvokeExpr(base, target.makeRef(), args.asJava)
+        case _                          => Jimple.v.newVirtualInvokeExpr(base, target.makeRef(), args.asJava)
+      }
+    def unapply(expr: InstanceInvokeExpr) = Some(expr.getBase, expr.getArgs.asScala, expr.getMethod)
   }
 
-  implicit class RichInstanceInvokeExpr(val v: InstanceInvokeExpr) extends AnyVal {
-    @inline def base = v.getBase
+  extension (v: InstanceInvokeExpr) {
+    def base: Value = v.getBase
   }
+
+  // ── Local ───────────────────────────────────────────────────────────────────
 
   object SLocal {
-    def unapply(l: Local): Option[(String, Type)] = Some(l.name, l.getType)
+    def unapply(l: Local): Option[(String, Type)] = Some(l.getName, l.getType)
   }
 
-  implicit class RichLocal(val v: Local) extends AnyVal {
-    @inline def name = v.getName
-
-    @inline def name_=(n: String) = v.setName(n)
+  extension (v: Local) {
+    def name: String              = v.getName
+    def name_=(n: String): Unit   = v.setName(n)
   }
+
+  // ── ArrayRef ────────────────────────────────────────────────────────────────
 
   object SArrayRef {
-    def unapply(ar: ArrayRef): Option[(Value, Value)] = Some(ar.base, ar.index)
+    def unapply(ar: ArrayRef): Option[(Value, Value)] = Some(ar.getBase, ar.getIndex)
   }
 
-  implicit class RichArrayRef(val v: ArrayRef) extends AnyVal {
-    @inline def base = v.getBase
-
-    @inline def baseBox = v.getBaseBox
-
-    @inline def index = v.getIndex
-
-    @inline def indexBox = v.getIndexBox
+  extension (v: ArrayRef) {
+    def base: Value        = v.getBase
+    def baseBox: ValueBox  = v.getBaseBox
+    def index: Value       = v.getIndex
+    def indexBox: ValueBox = v.getIndexBox
   }
+
+  // ── FieldRef ────────────────────────────────────────────────────────────────
 
   object SFieldRef {
-    def apply(sf: SootField) = sf.makeRef()
-
-    def unapply(fr: FieldRef) = Some(fr.getField)
+    def apply(sf: SootField): SootFieldRef   = sf.makeRef()
+    def unapply(fr: FieldRef): Option[SootField] = Some(fr.getField)
   }
 
-  implicit class RichFieldRef(val v: FieldRef) extends AnyVal {
-    @inline def field = v.getField
-
-    @inline def fieldRef = v.getFieldRef
-
-    @inline def fieldRef_=(sfr: SootFieldRef) = v.setFieldRef(sfr)
+  extension (v: FieldRef) {
+    def field: SootField                     = v.getField
+    def fieldRef: SootFieldRef               = v.getFieldRef
+    def fieldRef_=(sfr: SootFieldRef): Unit  = v.setFieldRef(sfr)
   }
 
   object SStaticFieldRef {
-    def apply(sf: SootField): SootFieldRef = sf.makeRef()
-
+    def apply(sf: SootField): SootFieldRef        = sf.makeRef()
     def unapply(fr: StaticFieldRef): Option[SootField] = Some(fr.getField)
   }
 
+  // ── CastExpr ────────────────────────────────────────────────────────────────
+
   object SCastExpr {
-    def unapply(ce: CastExpr): Option[(Value, Type)] = Some(ce.op, ce.castType)
+    def unapply(ce: CastExpr): Option[(Value, Type)] = Some(ce.getOp, ce.getCastType)
   }
 
-  implicit class RichCastExpr(val v: CastExpr) extends AnyVal {
-    @inline def op = v.getOp
-
-    @inline def op_=(newOp: Value) = v.setOp(newOp)
-
-    @inline def opBox = v.getOpBox
-
-    @inline def castType = v.getCastType
-
-    @inline def castType_=(newCt: Type) = v.setCastType(newCt)
+  extension (v: CastExpr) {
+    def op: Value                        = v.getOp
+    def op_=(newOp: Value): Unit         = v.setOp(newOp)
+    def opBox: ValueBox                  = v.getOpBox
+    def castType: Type                   = v.getCastType
+    def castType_=(ct: Type): Unit       = v.setCastType(ct)
   }
+
+  // ── DefinitionStmt ──────────────────────────────────────────────────────────
 
   object SDefinitionStmt {
-
-    /** Extractor that gives a tuple with the left op and the right op (in that order)
-      *
-      * @param ds the assign statement
-      * @return (left op, right op)
-      */
-    def unapply(ds: DefinitionStmt): Option[(Value, Value)] = Some(ds.leftOp, ds.rightOp)
+    def unapply(ds: DefinitionStmt): Option[(Value, Value)] = Some(ds.getLeftOp, ds.getRightOp)
   }
 
-  implicit class RichDefinitionStmt(val v: DefinitionStmt) extends AnyVal {
-    @inline def leftOp = v.getLeftOp
-
-    @inline def leftOpBox = v.getLeftOpBox
-
-    @inline def rightObBox = v.getRightOpBox
-
-    @inline def rightOp = v.getRightOp
+  extension (v: DefinitionStmt) {
+    def leftOp: Value    = v.getLeftOp
+    def leftOpBox: ValueBox = v.getLeftOpBox
+    def rightOp: Value   = v.getRightOp
+    def rightOpBox: ValueBox = v.getRightOpBox
   }
+
+  // ── IdentityStmt ────────────────────────────────────────────────────────────
 
   object SIdentityStmt {
-
-    /** Extractor that gives a tuple with the left op and the right op (in that order)
-      *
-      * @param is the identity statement
-      * @return (left op, right op)
-      */
-    def unapply(is: IdentityStmt): Option[(Value, Value)] = Some(is.leftOp, is.rightOp)
+    def unapply(is: IdentityStmt): Option[(Value, Value)] = Some(is.getLeftOp, is.getRightOp)
   }
 
   object SInstanceFieldRef {
-    def unapply(as: InstanceFieldRef) = Some(as.getBase, as.field)
+    def unapply(r: InstanceFieldRef) = Some(r.getBase, r.getField)
   }
 
   object SNewExpr {
-    def unapply(as: NewExpr) = Some(as.getBaseType)
+    def unapply(e: NewExpr) = Some(e.getBaseType)
   }
+
+  // ── AssignStmt ──────────────────────────────────────────────────────────────
 
   object SAssignStmt {
     def apply(left: Value, right: Value): AssignStmt = Jimple.v.newAssignStmt(left, right)
-
-    /** Extractor that gives a tuple with the left op and the right op (in that order)
-      *
-      * @param as the assign statement
-      * @return (left op, right op)
-      */
-    def unapply(as: AssignStmt) = Some(as.leftOp, as.rightOp)
+    def unapply(as: AssignStmt): Option[(Value, Value)] = Some(as.getLeftOp, as.getRightOp)
   }
 
-  implicit class RichAssignStmt(val v: AssignStmt) extends AnyVal {
-    @inline def rightOp_=(newRo: Value) = v.setRightOp(newRo)
-
-    @inline def leftOp_=(newLo: Value) = v.setLeftOp(newLo)
+  extension (v: AssignStmt) {
+    def rightOp_=(ro: Value): Unit = v.setRightOp(ro)
+    def leftOp_=(lo: Value): Unit  = v.setLeftOp(lo)
   }
+
+  // ── ReturnStmt ──────────────────────────────────────────────────────────────
 
   object SReturnStmt {
-    def unapply(rs: ReturnStmt): Option[Value] = Some(rs.op)
+    def unapply(rs: ReturnStmt): Option[Value] = Some(rs.getOp)
   }
 
-  implicit class RichReturnStmt(val v: ReturnStmt) extends AnyVal {
-    @inline def op = v.getOp
-
-    @inline def op_=(newOp: Value) = v.setOp(newOp)
+  extension (v: ReturnStmt) {
+    def op: Value              = v.getOp
+    def op_=(o: Value): Unit   = v.setOp(o)
   }
 
-  implicit class RichOptions(val v: Options) extends AnyVal {
-    @inline def classPath = v.soot_classpath()
-
-    @inline def classPath_=(newCp: String) = v.set_soot_classpath(newCp)
-
-    @inline def classPath_=(newCp: Seq[Path]) = v.set_soot_classpath(newCp.mkString(File.pathSeparator))
-
-    @inline def processPath: Seq[String] = v.process_dir().asScala.toSeq
-
-    @inline def processPath_=(newPp: Seq[String]) = v.set_process_dir(newPp.asJava)
-
-    @inline def allowPhantomRefs = v.allow_phantom_refs()
-
-    @inline def allowPhantomRefs_=(apr: Boolean): Unit = v.set_allow_phantom_refs(apr)
-
-    @inline def androidJars = v.android_jars()
-
-    @inline def androidJars_=(aj: String): Unit = v.set_android_jars(aj)
-
-    @inline def inAppMode = v.app()
-
-    @inline def inAppMode_=(setting: Boolean) = v.set_app(setting)
-
-    @inline def computeAstMetrics = v.ast_metrics()
-
-    @inline def computeAstMetrics_=(setting: Boolean): Unit = v.set_ast_metrics(setting)
-
-    @inline def checkInitThrowAnalysis = v.check_init_throw_analysis()
-
-    @inline def checkInitThrowAnalysis_=(setting: Int): Unit = v.set_check_init_throw_analysis(setting)
-
-    @inline def debug_=(setting: Boolean): Unit = v.set_debug(setting)
-
-    @inline def debugResolver = v.debug_resolver()
-
-    @inline def debugResolver_=(setting: Boolean): Unit = v.set_debug_resolver(setting)
-
-    @inline def dumpBody = v.dump_body().asScala.toSeq
-
-    @inline def dumpBody_=(setting: Seq[String]) = v.set_dump_body(setting.asJava)
-
-    @inline def dumpCfg = v.dump_cfg().asScala.toSeq
-
-    @inline def dumpCfg_=(setting: Seq[String]) = v.set_dump_cfg(setting.asJava)
-
-    @inline def dynamicClass = v.dynamic_class().asScala.toSeq
-
-    @inline def dynamicClass_=(setting: Seq[String]) = v.set_dynamic_class(setting.asJava)
-
-    @inline def dynamicDir = v.dynamic_dir().asScala.toSeq
-
-    @inline def dynamicDir_=(setting: Seq[String]) = v.set_dynamic_dir(setting.asJava)
-
-    @inline def dynamicPackage = v.dynamic_package().asScala.toSeq
-
-    @inline def dynamicPackage_=(setting: Seq[String]) = v.set_dynamic_package(setting.asJava)
-
-    @inline def excludes = v.exclude().asScala.toSeq
-
-    @inline def excludes_=(setting: Seq[String]) = v.set_exclude(setting.asJava)
-
-    @inline def forceAndroidJar = v.force_android_jar()
-
-    @inline def forceAndroidJar_=(setting: String) = v.set_force_android_jar(setting)
-
-    @inline def fullResolver = v.full_resolver()
-
-    @inline def fullResolver_=(setting: Boolean): Unit = v.set_full_resolver(setting)
-
-    @inline def phaseHelp(phase: String) = v.getPhaseHelp(phase)
-
-    @inline def phaseHelp = v.phase_help().asScala.toSeq
-
-    @inline def phaseHelp_=(help: Seq[String]): Unit = v.set_phase_help(help.asJava)
-
-    @inline def phaseList = v.phase_list()
-
-    @inline def phaseList_=(setting: Boolean) = v.set_phase_list(setting)
-
-    @inline def gzip_=(setting: Boolean) = v.set_gzip(setting)
-
-    @inline def help_=(setting: Boolean) = v.set_help(setting)
-
-    @inline def ignoreResolutionErrors = v.ignore_resolution_errors()
-
-    @inline def ignoreResolutionErrors_=(setting: Boolean) = v.set_ignore_resolution_errors(setting)
-
-    @inline def includes = v.include().asScala.toSeq
-
-    @inline def includes_=(setting: Seq[String]) = v.set_include(setting.asJava)
-
-    @inline def includeAll = v.include_all()
-
-    @inline def includeAll_=(setting: Boolean) = v.set_include_all(setting)
-
-    @inline def interactiveMode = v.interactive_mode()
-
-    @inline def interactiveMode_=(setting: Boolean) = v.set_interactive_mode(setting)
-
-    @inline def j2me_=(setting: Boolean) = v.set_j2me(setting)
-
-    @inline def keepLineNumber = v.keep_line_number()
-
-    @inline def keepLineNumber_=(keep: Boolean) = v.set_keep_line_number(keep)
-
-    @inline def keepOffset = v.keep_offset()
-
-    @inline def keepOffset_=(setting: Boolean) = v.set_keep_offset(setting)
-
-    @inline def mainClass = v.main_class()
-
-    @inline def mainClass_=(mc: String) = v.set_main_class(mc)
-
-    @inline def noBodiesForExcluded = v.no_bodies_for_excluded()
-
-    @inline def noBodiesForExcluded_=(setting: Boolean) = v.set_no_bodies_for_excluded(setting)
-
-    @inline def noOutputInnerClassesAttribute = v.no_output_inner_classes_attribute()
-
-    @inline def noOutputInnerClassesAttribute_=(setting: Boolean) = v.set_no_output_inner_classes_attribute(setting)
-
-    @inline def noOutputSourceFileAttribute = v.no_output_source_file_attribute()
-
-    @inline def noOutputSourceFileAttribute_=(setting: Boolean) = v.set_no_output_source_file_attribute(setting)
-
-    @inline def ooat_=(setting: Boolean) = v.set_oaat(setting)
-
-    @inline def omitExceptingUnitEdges = v.omit_excepting_unit_edges()
-
-    @inline def omitExceptingUnitEdges_=(setting: Boolean) = v.set_omit_excepting_unit_edges(setting)
-
-    @inline def onTheFly = v.on_the_fly()
-
-    @inline def onTheFly_=(setting: Boolean) = v.set_on_the_fly(setting)
-
-    @inline def outputDir = v.output_dir()
-
-    @inline def outputDir_=(setting: String) = v.set_output_dir(setting)
-
-    @inline def outputDir_=(setting: Path) =
-      v.set_output_dir(setting.toAbsolutePath.toString) //toAbsolutePath because the directory may not exist yet
-
-    @inline def outputFormat = v.output_format()
-
-    @inline def outputFormat_=(setting: Int) = v.set_output_format(setting)
-
-    @inline def outputJar = v.output_jar()
-
-    @inline def outputJar_=(setting: Boolean) = v.set_output_jar(setting)
-
-    @inline def prependClassPath: Boolean = v.prepend_classpath()
-
-    @inline def prependClassPath_=(setting: Boolean) = v.set_prepend_classpath(setting)
-
-    @inline def wholeProgram = v.whole_program()
-
-    @inline def wholeProgram_=(setting: Boolean) = v.set_whole_program(setting)
-
-    @inline def srcPrec = v.src_prec()
-
-    @inline def srcPrec_=(setting: Int) = v.set_src_prec(setting)
-
-    @inline def time_=(setting: Boolean) = v.set_time(setting)
-
-    @inline def noWriteOutBodyReleasing = v.no_writeout_body_releasing()
-
-    @inline def noWriteOutBodyReleasing_=(setting: Boolean) = v.set_no_writeout_body_releasing(setting)
-
+  // ── Options ─────────────────────────────────────────────────────────────────
+
+  extension (v: Options) {
+    def classPath: String                      = v.soot_classpath()
+    def classPath_=(cp: String): Unit          = v.set_soot_classpath(cp)
+    def classPath_=(cp: Seq[Path]): Unit       = v.set_soot_classpath(cp.mkString(File.pathSeparator))
+    def processPath: Seq[String]               = v.process_dir().asScala.toSeq
+    def processPath_=(pp: Seq[String]): Unit   = v.set_process_dir(pp.asJava)
+    def allowPhantomRefs: Boolean              = v.allow_phantom_refs()
+    def allowPhantomRefs_=(b: Boolean): Unit   = v.set_allow_phantom_refs(b)
+    def androidJars: String                    = v.android_jars()
+    def androidJars_=(s: String): Unit         = v.set_android_jars(s)
+    def inAppMode: Boolean                     = v.app()
+    def inAppMode_=(b: Boolean): Unit          = v.set_app(b)
+    def wholeProgram: Boolean                  = v.whole_program()
+    def wholeProgram_=(b: Boolean): Unit       = v.set_whole_program(b)
+    def mainClass: String                      = v.main_class()
+    def mainClass_=(mc: String): Unit          = v.set_main_class(mc)
+    def outputDir: String                      = v.output_dir()
+    def outputDir_=(s: String): Unit           = v.set_output_dir(s)
+    def outputDir_=(p: Path): Unit             = v.set_output_dir(p.toAbsolutePath.toString)
+    def outputFormat: Int                      = v.output_format()
+    def outputFormat_=(i: Int): Unit           = v.set_output_format(i)
+    def srcPrec: Int                           = v.src_prec()
+    def srcPrec_=(i: Int): Unit                = v.set_src_prec(i)
+    def keepLineNumber: Boolean                = v.keep_line_number()
+    def keepLineNumber_=(b: Boolean): Unit     = v.set_keep_line_number(b)
+    def prependClassPath: Boolean              = v.prepend_classpath()
+    def prependClassPath_=(b: Boolean): Unit   = v.set_prepend_classpath(b)
+    def fullResolver: Boolean                  = v.full_resolver()
+    def fullResolver_=(b: Boolean): Unit       = v.set_full_resolver(b)
   }
 
-  object SStringConstant {
-    def apply(s: String) = StringConstant.v(s)
-  }
+  // ── Constant factories ──────────────────────────────────────────────────────
 
-  object SIntConstant {
-    def apply(i: Int) = IntConstant.v(i)
-  }
-
-  object SLongConstant {
-    def apply(l: Long) = LongConstant.v(l)
-  }
-
-  object SDoubleConstant {
-    def apply(d: Double) = DoubleConstant.v(d)
-  }
-
-  object SFloatConstant {
-    def apply(d: Float) = FloatConstant.v(d)
-  }
+  object SStringConstant { def apply(s: String) = StringConstant.v(s) }
+  object SIntConstant    { def apply(i: Int)    = IntConstant.v(i)    }
+  object SLongConstant   { def apply(l: Long)   = LongConstant.v(l)   }
+  object SDoubleConstant { def apply(d: Double) = DoubleConstant.v(d) }
+  object SFloatConstant  { def apply(f: Float)  = FloatConstant.v(f)  }
 }
