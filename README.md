@@ -44,8 +44,8 @@ The interpreter is written in Scala 3 on top of [Soot 4.x](https://github.com/so
 
 ## Roadmap
 
-- [ ] Complete interpreter: arithmetic, bitwise, and comparison operators
-- [ ] Complete interpreter: field reads, array accesses, type casts
+- [x] Complete interpreter: arithmetic, bitwise, and comparison operators
+- [x] Complete interpreter: field reads, array accesses, type casts
 - [ ] Function call dispatch (`invokevirtual`, `invokestatic`, `invokespecial`)
 - [ ] `<init>` and `<clinit>` handling
 - [ ] Purity analysis pass

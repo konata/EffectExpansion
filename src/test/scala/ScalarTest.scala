@@ -7,7 +7,7 @@ import scala.collection.mutable
 
 import soot.jimple.*
 import soot.jimple.internal.JimpleLocal
-import soot.{IntType, LongType, FloatType, DoubleType, SootMethod, VoidType}
+import soot.{ArrayType, ByteType, CharType, DoubleType, FloatType, IntType, LongType, ShortType, SootMethod, VoidType}
 
 class ScalarTest extends AnyFlatSpec with Matchers {
 
@@ -177,5 +177,54 @@ class ScalarTest extends AnyFlatSpec with Matchers {
   it should "return None when a local is unbound" in {
     val x = new JimpleLocal("x", IntType.v())
     evalValue(Jimple.v().newNegExpr(x), S) shouldBe None
+  }
+
+  // ── type casts ─────────────────────────────────────────────────────────────
+
+  it should "cast int to long" in {
+    evalValue(Jimple.v().newCastExpr(IntConstant.v(42), LongType.v()), S) shouldBe Some(Types.Longs(42L))
+  }
+  it should "cast int to float" in {
+    evalValue(Jimple.v().newCastExpr(IntConstant.v(3), FloatType.v()), S) shouldBe Some(Types.Floats(3.0f))
+  }
+  it should "cast int to double" in {
+    evalValue(Jimple.v().newCastExpr(IntConstant.v(3), DoubleType.v()), S) shouldBe Some(Types.Doubles(3.0))
+  }
+  it should "cast long to int (narrowing)" in {
+    evalValue(Jimple.v().newCastExpr(LongConstant.v(300L), IntType.v()), S) shouldBe Some(Types.Ints(300))
+  }
+  it should "cast double to float (narrowing)" in {
+    evalValue(Jimple.v().newCastExpr(DoubleConstant.v(1.5), FloatType.v()), S) shouldBe Some(Types.Floats(1.5f))
+  }
+  it should "cast int to byte (truncating)" in {
+    evalValue(Jimple.v().newCastExpr(IntConstant.v(300), ByteType.v()), S) shouldBe Some(Types.Bytes(300.toByte))
+  }
+  it should "cast int to short" in {
+    evalValue(Jimple.v().newCastExpr(IntConstant.v(1000), ShortType.v()), S) shouldBe Some(Types.Shorts(1000.toShort))
+  }
+  it should "cast int to char" in {
+    evalValue(Jimple.v().newCastExpr(IntConstant.v(65), CharType.v()), S) shouldBe Some(Types.Chars('A'))
+  }
+
+  // ── array operations ───────────────────────────────────────────────────────
+
+  it should "create a new array with NewArrayExpr" in {
+    val result = evalValue(Jimple.v().newNewArrayExpr(IntType.v(), IntConstant.v(3)), S)
+    result shouldBe Some(Types.Arrays(scala.collection.mutable.ArrayBuffer(Types.Undefined, Types.Undefined, Types.Undefined)))
+  }
+  it should "get array length" in {
+    val arr = new JimpleLocal("arr", ArrayType.v(IntType.v(), 1))
+    val s   = scope(arr -> Types.Arrays(scala.collection.mutable.ArrayBuffer(Types.Ints(1), Types.Ints(2), Types.Ints(3))))
+    evalValue(Jimple.v().newLengthExpr(arr), s) shouldBe Some(Types.Ints(3))
+  }
+  it should "read an array element via ArrayRef" in {
+    val arr = new JimpleLocal("arr", ArrayType.v(IntType.v(), 1))
+    val s   = scope(arr -> Types.Arrays(scala.collection.mutable.ArrayBuffer(Types.Ints(10), Types.Ints(20))))
+    evalValue(Jimple.v().newArrayRef(arr, IntConstant.v(1)), s) shouldBe Some(Types.Ints(20))
+  }
+  it should "return None for out-of-bounds array access" in {
+    val arr = new JimpleLocal("arr", ArrayType.v(IntType.v(), 1))
+    val s   = scope(arr -> Types.Arrays(scala.collection.mutable.ArrayBuffer(Types.Ints(10))))
+    evalValue(Jimple.v().newArrayRef(arr, IntConstant.v(5)), s) shouldBe None
   }
 }
