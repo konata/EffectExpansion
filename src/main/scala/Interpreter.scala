@@ -1,8 +1,9 @@
 package side.effect.free
 
 import Predef.*
-import Wrappers.RichChain
+import Wrappers.{SAssignStmt, SLocal}
 
+import soot.jimple.*
 import soot.options.Options
 import soot.{SootMethod, Unit as SootUnit}
 
@@ -16,19 +17,25 @@ object Interpreter {
   }
 
   def interpret(entry: SootMethod, args: Array[Types], receiver: Option[Types]): Unit = {
-    val zygote   = Scope(mutable.Map(), None, entry, args, receiver)
-    val prologue = zygote.needle
-    debug("interpret", s"starting vm: $prologue")
-    while (prologue.next.isDefined) {
-      val instruction = prologue.advance
-      debug("interpret", s"running instruction: $instruction")
-      interpret(instruction, zygote)
+    val scope  = Scope(mutable.Map(), None, entry, args, receiver)
+    val needle = scope.needle
+    debug("interpret", s"method: $entry")
+    while (needle.next.isDefined) {
+      val instr = needle.advance
+      debug("interpret", s"step: $instr")
+      step(instr, scope)
     }
   }
 
-  def interpret(instruction: SootUnit, scope: Scope): Unit =
-    instruction match {
-      case statement: StatementSyntax => statement.eval(scope)
-      case _                          => raise("interpret", s"invalid unit: $instruction")
-    }
+  private def step(instr: SootUnit, scope: Scope): Scope = instr match {
+    case s: AssignStmt =>
+      val SAssignStmt(left @ SLocal(_, _), right) = s: @unchecked
+      evalValue(right, scope).foreach(scope.local(left) = _)
+      scope
+    case _: NopStmt        => scope
+    case _: ReturnVoidStmt => scope
+    case s =>
+      debug("step", s"unimplemented: $s")
+      scope
+  }
 }
