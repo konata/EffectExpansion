@@ -2,7 +2,6 @@ package side.effect.free
 
 import scala.language.implicitConversions
 import scala.collection.mutable
-import scala.util.control.Exception.catching
 
 import Predef.{debug, raise}
 import Wrappers.{SAssignStmt, SLocal}
@@ -54,7 +53,20 @@ case class Scope(
     args: Array[Types],
     receiver: Option[Types]
 ) {
-  val needle = Needle(method)
+  lazy val needle = Needle(method)
+
+  // Resolves any Jimple leaf value (Local or constant) to our type domain.
+  // BinopExpr / UnopExpr are NOT leaves — use evalValue for those.
+  def resolve(v: Value): Option[Types] = v match {
+    case l: Local          => local.get(l)
+    case c: IntConstant    => Some(Types.Ints(c.value))
+    case c: LongConstant   => Some(Types.Longs(c.value))
+    case c: FloatConstant  => Some(Types.Floats(c.value))
+    case c: DoubleConstant => Some(Types.Doubles(c.value))
+    case c: StringConstant => Some(Types.Strings(c.value))
+    case _: NullConstant   => Some(Types.Undefined)
+    case _                 => None
+  }
 }
 
 object Scope {
@@ -97,11 +109,7 @@ object StatementSyntax {
   class Assign(val expr: AssignStmt) extends StatementSyntax {
     override def eval(scope: Scope) = {
       val SAssignStmt(left @ SLocal(_, _), right) = expr: @unchecked
-      val (resolved, _) = right match {
-        case value: ValueSyntax => value.eval(scope)
-        case _                  => raise("Assign.eval", s"invalid value type: $right")
-      }
-      resolved.foreach(scope.local(left) = _)
+      evalValue(right, scope).foreach(scope.local(left) = _)
       scope
     }
   }
@@ -130,11 +138,9 @@ object MiscSyntax {
     override def eval(scope: Scope) = {
       val ArrayReference(base @ SLocal(_, _), index, _) = expr: @unchecked
       val immediate = for {
-        i <- index match {
-          case v @ SLocal(_, _) => catching(classOf[Throwable]) opt scope.local(v).asInstanceOf[Types.Ints].value
-          case v: IntConstant   => Some(v.value)
-        }
-        value <- catching(classOf[Throwable]) opt scope.local(base).asInstanceOf[Types.Arrays].value(i)
+        i     <- scope.resolve(index).collect { case Types.Ints(n) => n }
+        arr   <- scope.resolve(base).collect { case Types.Arrays(a) => a }
+        value <- arr.lift(i)
       } yield value
       debug("ArrayReference", s"$base($index) == $immediate")
       immediate -> scope
@@ -231,43 +237,244 @@ object ScalarSyntaxes {
     def unapply(arg: BinopExpr): Option[(Value, Value)] = Some(arg.getOp1, arg.getOp2)
   }
 
-  class Add(val add: AddExpr)    extends ScalarSyntaxes
-  class Sub(val sub: SubExpr)    extends ScalarSyntaxes
-  class Mul(val mul: MulExpr)    extends ScalarSyntaxes
-  class Div(val div: DivExpr)    extends ScalarSyntaxes
-  class And(val and: AndExpr)    extends ScalarSyntaxes
-  class Cmp(val cmp: CmpExpr)    extends ScalarSyntaxes
-  class Cmpg(val cmpg: CmpgExpr) extends ScalarSyntaxes
-  class Eq(val eq: EqExpr)       extends ScalarSyntaxes
-  class Ge(val ge: GeExpr)       extends ScalarSyntaxes
-  class Gt(val gt: GtExpr)       extends ScalarSyntaxes
-  class Lt(val lt: LtExpr)       extends ScalarSyntaxes
-  class Le(val le: LeExpr)       extends ScalarSyntaxes
-  class Ne(val ne: NeExpr)       extends ScalarSyntaxes
-  class Rem(val rem: RemExpr)    extends ScalarSyntaxes
-  class Shl(val shl: ShlExpr)    extends ScalarSyntaxes
-  class Shr(val shr: ShrExpr)    extends ScalarSyntaxes
-  class Ushr(val ushr: UshrExpr) extends ScalarSyntaxes
-  class Xor(val xor: XorExpr)    extends ScalarSyntaxes
-  class Neg(val neg: NegExpr)    extends ScalarSyntaxes
+  // ── helpers ────────────────────────────────────────────────────────────────
+
+  private def arith(l: Types, r: Types,
+      fi: (Int, Int) => Int, fl: (Long, Long) => Long,
+      ff: (Float, Float) => Float, fd: (Double, Double) => Double): Option[Types] =
+    (l, r) match {
+      case (Types.Ints(a),    Types.Ints(b))    => Some(Types.Ints(fi(a, b)))
+      case (Types.Longs(a),   Types.Longs(b))   => Some(Types.Longs(fl(a, b)))
+      case (Types.Floats(a),  Types.Floats(b))  => Some(Types.Floats(ff(a, b)))
+      case (Types.Doubles(a), Types.Doubles(b)) => Some(Types.Doubles(fd(a, b)))
+      case _                                    => None
+    }
+
+  // integer-only: And / Or / Xor
+  private def bitwise(l: Types, r: Types,
+      fi: (Int, Int) => Int, fl: (Long, Long) => Long): Option[Types] =
+    (l, r) match {
+      case (Types.Ints(a),  Types.Ints(b))  => Some(Types.Ints(fi(a, b)))
+      case (Types.Longs(a), Types.Longs(b)) => Some(Types.Longs(fl(a, b)))
+      case _                                => None
+    }
+
+  // shift: right operand is always Int in the JVM spec
+  private def shift(l: Types, r: Types,
+      fi: (Int, Int) => Int, fl: (Long, Int) => Long): Option[Types] =
+    (l, r) match {
+      case (Types.Ints(a),  Types.Ints(b)) => Some(Types.Ints(fi(a, b)))
+      case (Types.Longs(a), Types.Ints(b)) => Some(Types.Longs(fl(a, b)))
+      case _                               => None
+    }
+
+  // Eq / Ne / Lt / Le / Gt / Ge → returns Int 0 or 1
+  private def ordering(l: Types, r: Types,
+      fi: (Int, Int) => Boolean, fl: (Long, Long) => Boolean,
+      ff: (Float, Float) => Boolean, fd: (Double, Double) => Boolean): Option[Types] =
+    (l, r) match {
+      case (Types.Ints(a),    Types.Ints(b))    => Some(Types.Ints(if fi(a, b) then 1 else 0))
+      case (Types.Longs(a),   Types.Longs(b))   => Some(Types.Ints(if fl(a, b) then 1 else 0))
+      case (Types.Floats(a),  Types.Floats(b))  => Some(Types.Ints(if ff(a, b) then 1 else 0))
+      case (Types.Doubles(a), Types.Doubles(b)) => Some(Types.Ints(if fd(a, b) then 1 else 0))
+      case _                                    => None
+    }
+
+  // ── classes ────────────────────────────────────────────────────────────────
+
+  class Add(val e: AddExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- arith(l, r, _ + _, _ + _, _ + _, _ + _) } yield v) -> scope
+  }
+
+  class Sub(val e: SubExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- arith(l, r, _ - _, _ - _, _ - _, _ - _) } yield v) -> scope
+  }
+
+  class Mul(val e: MulExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- arith(l, r, _ * _, _ * _, _ * _, _ * _) } yield v) -> scope
+  }
+
+  class Div(val e: DivExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- arith(l, r, _ / _, _ / _, _ / _, _ / _) } yield v) -> scope
+  }
+
+  class Rem(val e: RemExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- arith(l, r, _ % _, _ % _, _ % _, _ % _) } yield v) -> scope
+  }
+
+  class And(val e: AndExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- bitwise(l, r, _ & _, _ & _) } yield v) -> scope
+  }
+
+  class Or(val e: OrExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- bitwise(l, r, _ | _, _ | _) } yield v) -> scope
+  }
+
+  class Xor(val e: XorExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- bitwise(l, r, _ ^ _, _ ^ _) } yield v) -> scope
+  }
+
+  class Shl(val e: ShlExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- shift(l, r, _ << _, _ << _) } yield v) -> scope
+  }
+
+  class Shr(val e: ShrExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- shift(l, r, _ >> _, _ >> _) } yield v) -> scope
+  }
+
+  class Ushr(val e: UshrExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- shift(l, r, _ >>> _, _ >>> _) } yield v) -> scope
+  }
+
+  class Eq(val e: EqExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- ordering(l, r, _ == _, _ == _, _ == _, _ == _) } yield v) -> scope
+  }
+
+  class Ne(val e: NeExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- ordering(l, r, _ != _, _ != _, _ != _, _ != _) } yield v) -> scope
+  }
+
+  class Lt(val e: LtExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- ordering(l, r, _ < _, _ < _, _ < _, _ < _) } yield v) -> scope
+  }
+
+  class Le(val e: LeExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- ordering(l, r, _ <= _, _ <= _, _ <= _, _ <= _) } yield v) -> scope
+  }
+
+  class Gt(val e: GtExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- ordering(l, r, _ > _, _ > _, _ > _, _ > _) } yield v) -> scope
+  }
+
+  class Ge(val e: GeExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) =
+      (for { l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2); v <- ordering(l, r, _ >= _, _ >= _, _ >= _, _ >= _) } yield v) -> scope
+  }
+
+  // long comparison: returns -1 / 0 / 1
+  class Cmp(val e: CmpExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) = {
+      val result = for {
+        l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2)
+      } yield (l, r) match {
+        case (Types.Longs(a), Types.Longs(b)) => Some(Types.Ints(a.compareTo(b)))
+        case _                                => None
+      }
+      result.flatten -> scope
+    }
+  }
+
+  // float/double comparison: NaN → +1
+  class Cmpg(val e: CmpgExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) = {
+      val result = for {
+        l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2)
+      } yield (l, r) match {
+        case (Types.Floats(a),  Types.Floats(b))  => Some(Types.Ints(floatCmp(a, b, nanResult = 1)))
+        case (Types.Doubles(a), Types.Doubles(b)) => Some(Types.Ints(doubleCmp(a, b, nanResult = 1)))
+        case _                                    => None
+      }
+      result.flatten -> scope
+    }
+  }
+
+  // float/double comparison: NaN → -1
+  class Cmpl(val e: CmplExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) = {
+      val result = for {
+        l <- scope.resolve(e.getOp1); r <- scope.resolve(e.getOp2)
+      } yield (l, r) match {
+        case (Types.Floats(a),  Types.Floats(b))  => Some(Types.Ints(floatCmp(a, b, nanResult = -1)))
+        case (Types.Doubles(a), Types.Doubles(b)) => Some(Types.Ints(doubleCmp(a, b, nanResult = -1)))
+        case _                                    => None
+      }
+      result.flatten -> scope
+    }
+  }
+
+  class Neg(val e: NegExpr) extends ScalarSyntaxes {
+    override def eval(scope: Scope) = {
+      val result = scope.resolve(e.getOp).map {
+        case Types.Ints(a)    => Types.Ints(-a)
+        case Types.Longs(a)   => Types.Longs(-a)
+        case Types.Floats(a)  => Types.Floats(-a)
+        case Types.Doubles(a) => Types.Doubles(-a)
+        case other            => other
+      }
+      result -> scope
+    }
+  }
+
+  private def floatCmp(a: Float, b: Float, nanResult: Int): Int =
+    if a > b then 1 else if a < b then -1 else if a == b then 0 else nanResult
+
+  private def doubleCmp(a: Double, b: Double, nanResult: Int): Int =
+    if a > b then 1 else if a < b then -1 else if a == b then 0 else nanResult
 
   given Conversion[AddExpr, Add]    = Add(_)
   given Conversion[SubExpr, Sub]    = Sub(_)
   given Conversion[MulExpr, Mul]    = Mul(_)
   given Conversion[DivExpr, Div]    = Div(_)
-  given Conversion[AndExpr, And]    = And(_)
-  given Conversion[CmpExpr, Cmp]    = Cmp(_)
-  given Conversion[CmpgExpr, Cmpg]  = Cmpg(_)
-  given Conversion[EqExpr, Eq]      = Eq(_)
-  given Conversion[GeExpr, Ge]      = Ge(_)
-  given Conversion[GtExpr, Gt]      = Gt(_)
-  given Conversion[LtExpr, Lt]      = Lt(_)
-  given Conversion[LeExpr, Le]      = Le(_)
-  given Conversion[NeExpr, Ne]      = Ne(_)
   given Conversion[RemExpr, Rem]    = Rem(_)
+  given Conversion[AndExpr, And]    = And(_)
+  given Conversion[OrExpr, Or]      = Or(_)
+  given Conversion[XorExpr, Xor]    = Xor(_)
   given Conversion[ShlExpr, Shl]    = Shl(_)
   given Conversion[ShrExpr, Shr]    = Shr(_)
   given Conversion[UshrExpr, Ushr]  = Ushr(_)
-  given Conversion[XorExpr, Xor]    = Xor(_)
+  given Conversion[EqExpr, Eq]      = Eq(_)
+  given Conversion[NeExpr, Ne]      = Ne(_)
+  given Conversion[LtExpr, Lt]      = Lt(_)
+  given Conversion[LeExpr, Le]      = Le(_)
+  given Conversion[GtExpr, Gt]      = Gt(_)
+  given Conversion[GeExpr, Ge]      = Ge(_)
+  given Conversion[CmpExpr, Cmp]    = Cmp(_)
+  given Conversion[CmpgExpr, Cmpg]  = Cmpg(_)
+  given Conversion[CmplExpr, Cmpl]  = Cmpl(_)
   given Conversion[NegExpr, Neg]    = Neg(_)
+}
+
+// ── Value dispatch ────────────────────────────────────────────────────────────
+// pattern match on Soot IR types → no implicit conversion needed here
+
+def evalValue(v: Value, scope: Scope): Option[Types] = v match {
+  case e: AddExpr  => ScalarSyntaxes.Add(e).eval(scope)._1
+  case e: SubExpr  => ScalarSyntaxes.Sub(e).eval(scope)._1
+  case e: MulExpr  => ScalarSyntaxes.Mul(e).eval(scope)._1
+  case e: DivExpr  => ScalarSyntaxes.Div(e).eval(scope)._1
+  case e: RemExpr  => ScalarSyntaxes.Rem(e).eval(scope)._1
+  case e: AndExpr  => ScalarSyntaxes.And(e).eval(scope)._1
+  case e: OrExpr   => ScalarSyntaxes.Or(e).eval(scope)._1
+  case e: XorExpr  => ScalarSyntaxes.Xor(e).eval(scope)._1
+  case e: ShlExpr  => ScalarSyntaxes.Shl(e).eval(scope)._1
+  case e: ShrExpr  => ScalarSyntaxes.Shr(e).eval(scope)._1
+  case e: UshrExpr => ScalarSyntaxes.Ushr(e).eval(scope)._1
+  case e: EqExpr   => ScalarSyntaxes.Eq(e).eval(scope)._1
+  case e: NeExpr   => ScalarSyntaxes.Ne(e).eval(scope)._1
+  case e: LtExpr   => ScalarSyntaxes.Lt(e).eval(scope)._1
+  case e: LeExpr   => ScalarSyntaxes.Le(e).eval(scope)._1
+  case e: GtExpr   => ScalarSyntaxes.Gt(e).eval(scope)._1
+  case e: GeExpr   => ScalarSyntaxes.Ge(e).eval(scope)._1
+  case e: CmpExpr  => ScalarSyntaxes.Cmp(e).eval(scope)._1
+  case e: CmpgExpr => ScalarSyntaxes.Cmpg(e).eval(scope)._1
+  case e: CmplExpr => ScalarSyntaxes.Cmpl(e).eval(scope)._1
+  case e: NegExpr  => ScalarSyntaxes.Neg(e).eval(scope)._1
+  case e: ArrayRef => MiscSyntax.ArrayReference(e).eval(scope)._1
+  case other       => scope.resolve(other)
 }
